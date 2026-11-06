@@ -153,6 +153,8 @@ test('the pane shows tab titles grouped by project, on every surface', async ($,
   on('ui.status', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: SELF_ID }))
+  on('session.cwd', () => ({ value: '/work/WEBSHOP' }))
+  on('fs.write', () => ({ value: undefined }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.usage', () => ({
     value: {

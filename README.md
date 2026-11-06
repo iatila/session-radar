@@ -6,8 +6,12 @@ tool usage for the session you are in, in a pane beside the chat.**
 
 ```
  ◎ Session radar                       updated 12s ago
- [◉ All] [⇄ Sessions] [◔ Usage] [⚒ Tools]
- ⟳ Refresh   ⧉ Copy name   ◉ Status line   ✕ Close
+ [◉ All] [⇄ Sessions ✉1 ⚠] [◔ Usage] [⚒ Tools]
+ ⟳ Refresh   ⧉ Copy name   ◉ Status line   ◉ Notify   ✕ Close
+╭ ⚠ POSSIBLE CONFLICT ───────────────────────────╮
+│ ✎ …/webshop/cart.ts was edited by webshop-04   │
+│   and webshop-6d                               │
+╰────────────────────────────────────────────────╯
 ╭ THIS SESSION ──────────────────────────────── ◆ ╮
 │ Checkout refactor                              │
 │ webshop-04 · claude-opus-5-5 · up 2h14m        │
@@ -25,13 +29,23 @@ tool usage for the session you are in, in a pane beside the chat.**
 │ ▾ webshop 3                                    │
 │   ◆ Checkout refactor                          │
 │     webshop-04 · this session · 2h ago         │
-│   ● Payment webhook retries             Copy   │
+│   ● Payment webhook retries            ✉  ⧉   │
 │     webshop-6d · busy · 15h ago                │
-│   ● Product search tests                Copy   │
+│   ● Product search tests               ✉  ⧉   │
 │     webshop-26 · idle · 30m ago                │
 │ ▾ blog 1                                       │
-│   ● Newsletter export                   Copy   │
+│   ● Newsletter export                  ✉  ⧉   │
 │     blog-58 · idle · 1h ago                    │
+╰────────────────────────────────────────────────╯
+╭ INBOX · 1 NEW ─────────────────── ✓ Mark read ╮
+│ ● webshop-6d · 2m ago               ↩ Reply   │
+│   Webhook retries are merged, tests green.     │
+╰────────────────────────────────────────────────╯
+╭ SPEND ─────────────────────── 5 sessions · 7 days ╮
+│ $12.40          $61.75                         │
+│ Today           Last 7 days                    │
+│ webshop   ██████████████████████   $9.80       │
+│ blog      █████▌                   $2.60       │
 ╰────────────────────────────────────────────────╯
 ```
 
@@ -58,14 +72,27 @@ and you know exactly which tab will receive it.
 | **This session** | Tab title, peer name (with Copy), model, uptime |
 | **Overview** | Context fill, 5-hour and 7-day rate limits as gauges (green, then amber from 60 %, red from 85 %), time to reset; cost, turns, average turn time, cost per turn; context fill after each turn; duration of each turn |
 | **Sessions** | Every open session on this machine, grouped by project folder: tab title, peer name, busy / idle, age, Copy. Your own session is marked ◆, busy ones ●. Offline Remote Control sessions are hidden behind a toggle |
+| **Possible conflicts** | Shown on top in amber when two sessions are busy in the same project folder at once, or when two sessions edited the same file in the last 30 minutes |
+| **Inbox** | Messages other sessions sent to this one, newest first, with Reply |
+| **Spend** | Today and the last 7 days across all your sessions, and today per project |
 | **Tokens** | Input, output, cache read and cache write as a stacked bar, cache hit rate, subagent turns on their own line |
 | **Tools** | The most used tools with call and error counts |
 
 It also pins a one-line summary under the prompt:
 
 ```
-◆ webshop-04  │  ctx ▰▰▰▱▱▱▱▱ 42%  │  $4.67  │  5h 23%  │  ⇄ 3 live (1 busy)
+◆ webshop-04  │  ctx ▰▰▰▱▱▱▱▱ 42%  │  $4.67  │  5h 23%  │  ⇄ 3 live (1 busy)  │  ✉ 1  │  ⚠ 1 conflict
 ```
+
+And it tells you when something needs you, as a desktop notification (or a
+toast where the terminal has none):
+
+- **A session finished.** When another session goes from busy to idle:
+  *"webshop-6d finished: Payment webhook retries"*. Run several agents at once
+  and stop checking tabs.
+- **A possible conflict.** When two sessions start working in the same folder,
+  or touch the same file: *"cart.ts was edited by webshop-04 and webshop-6d"*.
+- **A message arrived.** A toast with the sender and the first line.
 
 ## Where it works
 
@@ -98,19 +125,23 @@ hooks module.
 Inside the pane, the tabs filter what is shown (**All**, **Sessions**,
 **Usage**, **Tools**; keys `1` to `4` while the pane has focus), and the
 actions under them refresh (`r`), copy this session's name (`c`), switch the
-status line on or off (`s`) and close the pane.
+status line on or off (`s`), switch notifications on or off (`n`) and close
+the pane.
 
 | Command | What it does |
 | --- | --- |
 | `/radar` | Open (or focus) the pane and refresh it |
 | `/radar name` | Print this session's peer name and copy it |
 | `/radar peers` | Print the live sessions, grouped by project, with their titles |
+| `/radar inbox` | Print the latest messages and mark them read |
+| `/radar send <name> <text>` | Send a message to another session without asking the model |
 | `/radar status on` / `off` | Show or hide the status line summary |
+| `/radar notify on` / `off` | Turn the notifications on or off |
 
-**Messaging another session.** Press *Copy* next to the session you want, then
-ask your agent: *"Use SendMessage to send `webshop-6d` a summary of the API
-change."* The receiving session gets it as a message from yours and can reply
-the same way.
+**Messaging another session.** Press ✉ next to the session you want, type,
+press Enter. The message goes straight to that session, no model call on your
+side. Or press ⧉ to copy its name and ask your agent: *"Use SendMessage to
+send `webshop-6d` a summary of the API change."* Replies land in your Inbox.
 
 **Watching your budget.** Keep an eye on the Context ring: past 85 % the
 session will compact soon, so it is a good moment to wrap up or `/compact`
@@ -130,18 +161,29 @@ window is used and when it resets.
 - **Project folders** come from Claude Code's local session registry
   (`~/.claude/sessions/*.json`, read only; the `.key` files there are never
   opened).
-- **Tab titles** come from each session's transcript
-  (`~/.claude/projects/<folder>/<session id>.jsonl`): the last `/rename`
-  title, otherwise the last generated one. A transcript is read again only
-  when it changed, at most every 5 minutes, and skipped above 32 MB.
+- **Tab titles** come from each session's ledger (below) when that session
+  runs session-radar; otherwise from its transcript
+  (`~/.claude/projects/<folder>/<session id>.jsonl`, the last `/rename` title,
+  else the last generated one), re-read at most every 5 minutes and skipped
+  above 4 MB.
+- **Finished sessions** are spotted by reading the session registry every 10
+  seconds and comparing each session's status with the last reading.
+- **Spend, edits and titles across sessions** go through a small ledger:
+  every session that runs session-radar writes one file a day,
+  `~/.claude/session-radar/ledger/<day>/<session id>.json`, holding its own
+  cost for that day, its title and the files it edited in the last 30
+  minutes. Each session writes only its own file and reads the others.
+- **Messages** use the same channel as `SendMessage`; incoming ones are read
+  from the `<cross-session-message>` envelope the engine wraps them in.
 
 ## Privacy and cost
 
 - **No model calls.** The mod never asks the model anything, so it costs no
   tokens.
 - **No network.** Nothing leaves your machine.
-- **No writes.** It reads the files listed above and keeps its figures in the
-  session's own plugin state.
+- **One small write.** The ledger above is the only thing written to disk:
+  cost, title and edited file paths, never file contents or prompts. Delete
+  `~/.claude/session-radar/` at any time; it is rebuilt from the next turn.
 
 ## Limitations
 
@@ -153,6 +195,10 @@ window is used and when it resets.
   API. If they move, titles and project groups fall back to peer names.
 - Copy writes to the terminal clipboard; where a surface does not pass
   clipboard writes through, a toast shows the name instead.
+- Spend and edit conflicts only count sessions that run session-radar. A
+  session started before you installed it is not counted until it restarts.
+- A day of spend is your local calendar day. A session that was resumed from
+  an earlier day starts counting from the moment the mod loads.
 - Chart colours are fixed (an SVG image cannot read the editor theme); they
   were picked and checked to read on both light and dark backgrounds.
 
@@ -174,9 +220,11 @@ claude plugin marketplace add /path/to/session-radar
 claude plugin install session-radar@session-radar --scope user
 ```
 
-`hooks/register.tsx` is the whole mod; `types/index.d.ts` declares its state;
-`tests/radar.test.tsx` covers parsing, grouping, the status line and the pane
-on all four surfaces.
+`hooks/register.tsx` is the mod; `hooks/ledger.ts` holds the pure parts
+(message envelopes, conflicts, spend); `types/index.d.ts` declares its state.
+`tests/` covers parsing, grouping, the status line, the pane on all four
+surfaces, notifications, the inbox, sending, conflicts, spend and the failure
+paths (an unreadable transcript, a failed ledger write).
 
 ## License
 

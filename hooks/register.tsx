@@ -2,9 +2,14 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderSurface } from 'claude-code'
 
 import type {
+  Conflict,
   Directory,
   Identity,
+  InboxItem,
+  LedgerEdit,
+  LedgerFile,
   Peer,
+  Spend,
   Tokens,
   ToolStat,
   Tools,
@@ -12,14 +17,34 @@ import type {
   Usage,
   View,
 } from '../types'
+import {
+  EDIT_TOOLS,
+  INBOX_MAX,
+  WEEK_DAYS,
+  addEdit,
+  conflictKey,
+  dayKey,
+  findConflicts,
+  toLedgerFile,
+  lastDays,
+  normalizePath,
+  parseInbound,
+  shortPath,
+  summarizeSpend,
+} from './ledger'
 
 const PANE = 'session-radar'
 const PANE_TITLE = 'Session radar'
 const COMMAND = 'radar'
 const REFRESH_EVERY_MS = 60_000
 const REFRESH_MIN_GAP_MS = 15_000
+const WATCH_EVERY_MS = 10_000
+const LEDGER_DIR = 'session-radar/ledger'
+const INBOX_SHOWN = 5
+const NOTIFY_TITLE = 'Session radar'
 const TITLE_RECHECK_MS = 5 * 60_000
-const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
+// $.fs.read refuses files over 4 MiB; a larger transcript is skipped.
+const MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 const TOP_TOOLS = 8
 const BAR_MAX = 20
 const MINI_BAR = 8
@@ -104,6 +129,28 @@ const TABS: { view: View; glyph: string; label: string; color: string }[] = [
 const isOfflineShown = atom(
   { plugin: 'session-radar', key: 'isOfflineShown' } as const,
   false,
+)
+const isNotifyOn = atom({ plugin: 'session-radar', key: 'isNotifyOn' } as const, true)
+const inbox = atom(
+  { plugin: 'session-radar', key: 'inbox' } as const,
+  [] as InboxItem[],
+  { shape: 'inbox-1' },
+)
+const inboxSeenAt = atom({ plugin: 'session-radar', key: 'inboxSeenAt' } as const, 0)
+const conflicts = atom(
+  { plugin: 'session-radar', key: 'conflicts' } as const,
+  [] as Conflict[],
+  { shape: 'conflicts-1' },
+)
+const spendSummary = atom(
+  { plugin: 'session-radar', key: 'spend' } as const,
+  { todayUsd: 0, weekUsd: 0, byProject: [], sessions: 0, updatedAt: null } as Spend,
+  { shape: 'spend-1' },
+)
+const compose = atom({ plugin: 'session-radar', key: 'compose' } as const, null as string | null)
+const ledgerError = atom(
+  { plugin: 'session-radar', key: 'ledgerError' } as const,
+  null as string | null,
 )
 
 type ModelUsageLike = {
@@ -460,7 +507,13 @@ async function readTitle(
     (cached.mtimeMs === stat.mtimeMs || now - cached.checkedAt < TITLE_RECHECK_MS)
   if (isFresh || stat.size > MAX_TRANSCRIPT_BYTES) return cached?.title ?? null
 
-  const title = titleFromTranscript(await $.fs.read(path))
+  let title: string | null
+  try {
+    title = titleFromTranscript(await $.fs.read(path))
+  } catch (error) {
+    $.ui.log(`session-radar: title of ${entry.name} unreadable: ${String(error)}`, { to: 'debug' })
+    title = null
+  }
   titleCache.set(entry.sessionId, { mtimeMs: stat.mtimeMs, checkedAt: now, title })
 
   return title
@@ -502,11 +555,20 @@ async function scan($: EngineInterface, isForced: boolean): Promise<void> {
     read($, identity),
   ])
   const byName = new Map(registry.map(r => [r.name, r]))
+  const { day } = await today($)
+  const ledgerTitles = new Map(
+    (root === null ? [] : await readLedgers($, root, [day])).flatMap(l =>
+      l.title === null ? [] : [[l.sessionId, l.title] as const],
+    ),
+  )
   const selfEntry = registry.find(r => r.sessionId === who.sessionId) ?? null
   const selfName = selfEntry?.name ?? listed.self?.name ?? who.name
 
-  const titleOf = (entry: RegistryEntry | null): Promise<string | null> =>
-    entry === null || root === null ? Promise.resolve(null) : readTitle($, root, entry, now)
+  const titleOf = async (entry: RegistryEntry | null): Promise<string | null> => {
+    if (entry === null || root === null) return null
+
+    return ledgerTitles.get(entry.sessionId) ?? readTitle($, root, entry, now)
+  }
 
   const toPeer = async (
     row: ListedRow,
@@ -547,7 +609,12 @@ async function scan($: EngineInterface, isForced: boolean): Promise<void> {
       ? []
       : [
           toPeer(
-            { name: selfName, ref: listed.self?.ref ?? who.ref, kind: 'interactive', status: BUSY },
+            {
+              name: selfName,
+              ref: listed.self?.ref ?? who.ref,
+              kind: 'interactive',
+              status: selfEntry?.status ?? BUSY,
+            },
             selfEntry,
             true,
           ),
@@ -582,10 +649,18 @@ async function refreshStatus($: EngineInterface): Promise<void> {
   const who = await read($, identity)
   const u = await read($, usage)
   const { peers } = await read($, directory)
-  $.ui.status(statusLine(who, u, peers))
+  const seenAt = await read($, inboxSeenAt)
+  const unread = (await read($, inbox)).filter(m => m.at > seenAt).length
+  const conflictCount = (await read($, conflicts)).length
+  $.ui.status(statusLine(who, u, peers, { unread, conflicts: conflictCount }))
 }
 
-export const statusLine = (who: Identity, u: Usage, peers: Peer[]): string | undefined => {
+export const statusLine = (
+  who: Identity,
+  u: Usage,
+  peers: Peer[],
+  extra: { unread: number; conflicts: number } = { unread: 0, conflicts: 0 },
+): string | undefined => {
   const live = peers.filter(p => !p.isSelf && p.status !== OFFLINE)
   const busy = live.filter(p => p.status === BUSY).length
   const fiveHour = u.rateLimits.find(r => r.kind === 'five_hour')
@@ -597,6 +672,8 @@ export const statusLine = (who: Identity, u: Usage, peers: Peer[]): string | und
     u.costUsd === null ? null : fmtUsd(u.costUsd),
     fiveHour === undefined ? null : `5h ${Math.round(fiveHour.percentUsed)}%`,
     live.length === 0 ? null : `⇄ ${live.length} live${busy > 0 ? ` (${busy} busy)` : ''}`,
+    extra.unread === 0 ? null : `✉ ${extra.unread}`,
+    extra.conflicts === 0 ? null : `⚠ ${extra.conflicts} conflict${extra.conflicts > 1 ? 's' : ''}`,
   ].filter((p): p is string => p !== null)
 
   return parts.length === 0 ? undefined : parts.join('  │  ')
@@ -625,7 +702,228 @@ async function refreshUsage($: EngineInterface): Promise<void> {
 }
 
 async function refreshAll($: EngineInterface, isForced: boolean): Promise<void> {
-  await Promise.all([refreshUsage($), refreshDirectory($, isForced)])
+  await Promise.all([refreshUsage($), refreshDirectory($, isForced), refreshSpend($)])
+  await refreshStatus($)
+}
+
+type MyLedger = { day: string; baseUsd: number; lastUsd: number; edits: LedgerEdit[] }
+
+let mine: MyLedger | null = null
+let ledgerQueue: Promise<void> = Promise.resolve()
+const lastStatus = new Map<string, string | null>()
+const seenConflicts = new Set<string>()
+
+const ledgerPath = (root: string, day: string, sessionId: string): string =>
+  `${root}/${LEDGER_DIR}/${day}/${sessionId}.json`
+
+async function today($: EngineInterface): Promise<{ now: number; day: string; offset: number }> {
+  const now = await $.clock.now()
+  const offset = new Date(now).getTimezoneOffset()
+
+  return { now, day: dayKey(now, offset), offset }
+}
+
+async function readLedgerFile($: EngineInterface, path: string): Promise<LedgerFile | null> {
+  let value: unknown
+  try {
+    value = JSON.parse(await $.fs.read(path))
+  } catch {
+    // Another session may be rewriting its file this instant; the next poll
+    // reads it whole.
+    return null
+  }
+
+  return toLedgerFile(value)
+}
+
+async function readLedgers($: EngineInterface, root: string, days: string[]): Promise<LedgerFile[]> {
+  const perDay = await Promise.all(
+    days.map(async day => {
+      const dir = `${root}/${LEDGER_DIR}/${day}`
+      if (!(await $.fs.exists(dir))) return []
+      const files = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.json'))
+
+      return Promise.all(files.map(f => readLedgerFile($, `${dir}/${f.name}`)))
+    }),
+  )
+
+  return perDay.flat().filter((l): l is LedgerFile => l !== null)
+}
+
+async function startLedgerDay(
+  $: EngineInterface,
+  root: string,
+  sessionId: string,
+  day: string,
+  costUsd: number,
+  offset: number,
+): Promise<MyLedger> {
+  const path = ledgerPath(root, day, sessionId)
+  const stored = (await $.fs.exists(path)) ? await readLedgerFile($, path) : null
+  if (stored !== null) {
+    return { day, baseUsd: costUsd - stored.usd, lastUsd: costUsd, edits: stored.edits }
+  }
+  if (mine !== null) return { day, baseUsd: mine.lastUsd, lastUsd: costUsd, edits: [] }
+  const startedAt = (await read($, usage)).startedAt
+  const isStartedToday = startedAt !== null && dayKey(startedAt, offset) === day
+
+  return { day, baseUsd: isStartedToday ? 0 : costUsd, lastUsd: costUsd, edits: [] }
+}
+
+async function writeLedgerNow(
+  $: EngineInterface,
+  change: { costUsd?: number; editedFile?: string },
+): Promise<void> {
+  const root = await configRoot($)
+  const who = await read($, identity)
+  if (root === null || who.sessionId === null) return
+  const { now, day, offset } = await today($)
+  const costUsd = change.costUsd ?? (await read($, usage)).costUsd ?? mine?.lastUsd ?? 0
+  if (mine === null || mine.day !== day) {
+    mine = await startLedgerDay($, root, who.sessionId, day, costUsd, offset)
+  }
+  mine = {
+    ...mine,
+    lastUsd: costUsd,
+    edits:
+      change.editedFile === undefined ? mine.edits : addEdit(mine.edits, change.editedFile, now),
+  }
+  const cwd = await $.session.cwd()
+  const file: LedgerFile = {
+    sessionId: who.sessionId,
+    name: who.name,
+    title: who.title,
+    cwd,
+    project: basename(cwd),
+    day,
+    usd: Math.max(0, costUsd - mine.baseUsd),
+    edits: mine.edits,
+    updatedAt: now,
+  }
+  await $.fs.write(ledgerPath(root, day, who.sessionId), JSON.stringify(file))
+}
+
+// Each write waits for the one before; a failed write is shown on the Spend
+// card and logged, and the queue goes on so the next change is still written.
+function writeLedger(
+  $: EngineInterface,
+  change: { costUsd?: number; editedFile?: string },
+): Promise<void> {
+  ledgerQueue = ledgerQueue
+    .then(() => writeLedgerNow($, change))
+    .then(
+      async () => {
+        await update($, ledgerError, () => null)
+      },
+      async (error: unknown) => {
+        const message = String(error)
+        $.ui.log(`session-radar: ledger write failed: ${message}`, { to: 'debug' })
+        await update($, ledgerError, () => message)
+      },
+    )
+
+  return ledgerQueue
+}
+
+function background($: EngineInterface, label: string, work: Promise<unknown>): void {
+  work.catch((error: unknown) => {
+    $.ui.log(`session-radar: ${label} failed: ${String(error)}`, { to: 'debug' })
+  })
+}
+
+async function refreshSpend($: EngineInterface): Promise<void> {
+  const root = await configRoot($)
+  if (root === null) return
+  const { now, day, offset } = await today($)
+  const ledgers = await readLedgers($, root, lastDays(now, offset, WEEK_DAYS))
+  await update($, spendSummary, () => summarizeSpend(ledgers, day, now))
+}
+
+async function notify($: EngineInterface, text: string): Promise<void> {
+  if (!(await read($, isNotifyOn))) return
+  const sent = await $.ui.notify(text, { title: NOTIFY_TITLE })
+  if (!sent.isSent) $.ui.toast(text)
+}
+
+async function watch($: EngineInterface): Promise<void> {
+  const root = await configRoot($)
+  if (root === null) return
+  const who = await read($, identity)
+  const registry = await readRegistry($, root)
+  const { now, day } = await today($)
+  const dir = await read($, directory)
+  const titleOf = new Map(dir.peers.map(p => [p.name, p.title]))
+
+  const isFirstPass = lastStatus.size === 0
+  for (const entry of registry) {
+    const before = lastStatus.get(entry.sessionId)
+    lastStatus.set(entry.sessionId, entry.status)
+    const hasFinished =
+      !isFirstPass && entry.sessionId !== who.sessionId && before === BUSY && entry.status !== BUSY
+    if (hasFinished) {
+      const title = titleOf.get(entry.name)
+      await notify($, `${entry.name} finished${title ? `: ${title}` : ''}`)
+    }
+  }
+
+  const statusOf = new Map(registry.map(r => [r.name, r.status]))
+  const isChanged = dir.peers.some(
+    p => statusOf.has(p.name) && statusOf.get(p.name) !== p.status && p.status !== OFFLINE,
+  )
+  const peers = isChanged
+    ? dir.peers.map(p =>
+        statusOf.has(p.name) && p.status !== OFFLINE ? { ...p, status: statusOf.get(p.name) ?? p.status } : p,
+      )
+    : dir.peers
+  if (isChanged) await update($, directory, d => ({ ...d, peers }))
+
+  const found = findConflicts(
+    peers.filter(p => p.status !== OFFLINE),
+    await readLedgers($, root, [day]),
+    now,
+    BUSY,
+  )
+  const before = await read($, conflicts)
+  const keys = found.map(conflictKey).sort().join('\n')
+  if (keys !== before.map(conflictKey).sort().join('\n')) {
+    await update($, conflicts, () => found)
+  }
+  for (const c of found) {
+    const key = conflictKey(c)
+    if (seenConflicts.has(key)) continue
+    seenConflicts.add(key)
+    await notify($, conflictText(c))
+  }
+  await refreshStatus($)
+}
+
+const conflictText = (c: Conflict): string =>
+  c.kind === 'folder'
+    ? `${c.sessions.length} sessions are working in ${c.project} at once: ${c.sessions.join(', ')}`
+    : `${shortPath(c.target)} was edited by ${c.sessions.join(' and ')}`
+
+async function sendMessage(
+  $: EngineInterface,
+  to: string,
+  text: string,
+): Promise<void> {
+  const body = text.trim()
+  if (body === '') return
+  const sent = await $.session.send({ to, text: body })
+  $.ui.toast(sent.isDelivered ? `Sent to ${to}` : `Not sent to ${to}: ${sent.reason}`)
+  if (sent.isDelivered) await update($, compose, () => null)
+}
+
+async function markRead($: EngineInterface, list: InboxItem[]): Promise<void> {
+  await update($, inboxSeenAt, () => Math.max(0, ...list.map(m => m.at)))
+  await refreshStatus($)
+}
+
+async function receive($: EngineInterface, text: string): Promise<void> {
+  const item = parseInbound(text, await $.clock.now())
+  if (item === null) return
+  await update($, inbox, list => [...list, item].slice(-INBOX_MAX))
+  $.ui.toast(`✉ ${item.from}: ${item.text.slice(0, 80)}`)
   await refreshStatus($)
 }
 
@@ -644,7 +942,9 @@ async function copy(
 
 async function setTitle($: EngineInterface, title: string | undefined): Promise<void> {
   if (!title) return
+  const before = (await read($, identity)).title
   await update($, identity, who => ({ ...who, title }))
+  if (before !== title) await writeLedger($, {})
   await update($, directory, d => ({
     ...d,
     peers: d.peers.map(p => (p.isSelf ? { ...p, title } : p)),
@@ -656,16 +956,24 @@ export const register: Register = on => {
     const started = await next(e)
     await $.command.register({
       name: COMMAND,
-      description: 'Session radar: open the pane, or `name`, `peers`, `status on|off`',
-      argumentHint: '[name|peers|status on|off]',
+      description:
+        'Session radar: open the pane, or `name`, `peers`, `inbox`, `send <name> <text>`, `status on|off`, `notify on|off`',
+      argumentHint: '[name|peers|inbox|send|status|notify]',
     })
     const sessionId = await $.session.id()
     await update($, identity, who => ({ ...who, sessionId }))
-    void refreshAll($, true)
-    $.clock.every(REFRESH_EVERY_MS, () => void refreshAll($, false))
+    background($, 'start', refreshAll($, true).then(() => writeLedger($, {})))
+    $.clock.every(REFRESH_EVERY_MS, () => background($, 'refresh', refreshAll($, false)))
+    $.clock.every(WATCH_EVERY_MS, () => background($, 'watch', watch($)))
 
     return started
   })
+
+  on('session.receive', async ($, e, next) => {
+    if (e.agentId === undefined) await receive($, e.text)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('classic.SessionStart', async ($, e, next) => {
     await setTitle($, e.session_title)
@@ -693,6 +1001,7 @@ export const register: Register = on => {
       })),
     }))
     await refreshStatus($)
+    if (e.cost !== undefined) void writeLedger($, { costUsd: e.cost.usd })
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -711,6 +1020,13 @@ export const register: Register = on => {
       }
     }
     await update($, tools, all => ({ ...all, [e.tool]: bump(all[e.tool]) }))
+
+    const target = e as { file_path?: unknown; notebook_path?: unknown }
+    const edited = target.file_path ?? target.notebook_path
+    const isEdit = EDIT_TOOLS.has(e.tool) && ran.deny === undefined && ran.isError !== true
+    if (isEdit && typeof edited === 'string') {
+      void writeLedger($, { editedFile: normalizePath(edited) })
+    }
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -745,7 +1061,7 @@ export const register: Register = on => {
         main: spent ? addTokens(t.main, spent) : t.main,
       }
     })
-    if (e.agentId === undefined) void refreshAll($, false)
+    if (e.agentId === undefined) background($, 'refresh', refreshAll($, false))
 
     return done
   }).catch(($, e, next) => next(e))
@@ -759,6 +1075,37 @@ export const register: Register = on => {
       await refreshStatus($)
 
       return { text: `Session radar status line ${isOn ? 'on' : 'off'}.` }
+    }
+
+    if (verb === 'notify') {
+      const isOn = arg !== 'off'
+      await update($, isNotifyOn, () => isOn)
+
+      return { text: `Session radar notifications ${isOn ? 'on' : 'off'}.` }
+    }
+
+    if (verb === 'send') {
+      const to = arg ?? ''
+      const body = e.args.trim().slice('send'.length).trim().slice(to.length).trim()
+      if (to === '' || body === '') return { text: 'Usage: /radar send <name> <message>' }
+      const sent = await $.session.send({ to, text: body })
+
+      return { text: sent.isDelivered ? `Sent to ${to}.` : `Not sent to ${to}: ${sent.reason}` }
+    }
+
+    if (verb === 'inbox') {
+      const list = await read($, inbox)
+      await update($, inboxSeenAt, () => Math.max(0, ...list.map(m => m.at)))
+      await refreshStatus($)
+      if (list.length === 0) return { text: 'No messages from other sessions yet.' }
+      const now = await $.clock.now()
+
+      return {
+        text: list
+          .slice(-INBOX_SHOWN)
+          .map(m => `${m.from} · ${fmtAge(now - m.at)}\n  ${m.text.replace(/\n/g, '\n  ')}`)
+          .join('\n'),
+      }
     }
 
     if (verb === 'name') {
@@ -796,14 +1143,14 @@ export const register: Register = on => {
     }
 
     await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true })
-    void refreshAll($, true)
+    background($, 'refresh', refreshAll($, true))
 
     return { text: 'Session radar opened.' }
   }).catch(($, e, next) => ({ text: `Session radar failed: ${String(next.error)}` }))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const elements = $.ui.resolve(e)
-    const { Box, Text, Button } = elements
+    const { Box, Text, Button, Input } = elements
     const Svg = e.surface !== 'terminal' && 'Svg' in elements ? elements.Svg : null
     const who = await read($, identity)
     const dir = await read($, directory)
@@ -811,8 +1158,16 @@ export const register: Register = on => {
     const t = await read($, turns)
     const toolStats = await read($, tools)
     const isOffline = await read($, isOfflineShown)
+    const isNotify = await read($, isNotifyOn)
+    const messages = await read($, inbox)
+    const seenAt = await read($, inboxSeenAt)
+    const found = await read($, conflicts)
+    const costs = await read($, spendSummary)
+    const composeTo = await read($, compose)
+    const writeError = await read($, ledgerError)
     const now = await $.clock.now()
     const model = await $.session.model()
+    const unread = messages.filter(m => m.at > seenAt).length
 
     const barWidth = Math.max(6, Math.min(BAR_MAX, e.props.bodyColumns - 14))
 
@@ -863,35 +1218,189 @@ export const register: Register = on => {
       return <Text color="inactive">●</Text>
     }
 
-    const peerRow = (p: Peer) => (
-      <Box
-        key={`peer:${p.ref ?? p.name}`}
-        flexDirection="row"
-        justifyContent="space-between"
-        alignItems="center"
-        gap={1}
-        hover={{ backgroundColor: 'subtle' }}
-      >
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-          <Text wrap="truncate-end">
-            {dot(p)} <Text weight="medium">{p.title ?? p.name}</Text>
-          </Text>
-          <Text size="caption" dimColor wrap="truncate-end">
-            {'  '}
-            {[p.title ? p.name : null, p.isSelf ? 'this session' : p.status, p.started]
-              .filter(Boolean)
-              .join(' · ')}
-          </Text>
-        </Box>
-        {p.status !== OFFLINE && (
-          <Button
-            key={`copy:${p.ref ?? p.name}`}
-            label="Copy"
-            plain
-            onPress={press => void copy($, p.name, press.surface)}
-          />
-        )}
+    const composer = (to: string) => (
+      <Box key={`compose:${to}`} flexDirection="column" paddingLeft={2}>
+        <Input
+          key="compose"
+          label={`Message to ${to}`}
+          placeholder="Write a message, Enter sends"
+          submitLabel="Send"
+          rows={2}
+          autoFocus
+          onSubmit={value => void sendMessage($, to, value)}
+        />
+        <Button key="compose:cancel" plain dimColor onPress={() => void update($, compose, () => null)}>
+          ✕ Cancel
+        </Button>
       </Box>
+    )
+
+    const peerRow = (p: Peer) => (
+      <Box key={`row:${p.ref ?? p.name}`} flexDirection="column">
+        <Box
+          key={`peer:${p.ref ?? p.name}`}
+          flexDirection="row"
+          justifyContent="space-between"
+          alignItems="center"
+          gap={1}
+          hover={{ backgroundColor: 'subtle' }}
+        >
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text wrap="truncate-end">
+              {dot(p)} <Text weight="medium">{p.title ?? p.name}</Text>
+            </Text>
+            <Text size="caption" dimColor wrap="truncate-end">
+              {'  '}
+              {[p.title ? p.name : null, p.isSelf ? 'this session' : p.status, p.started]
+                .filter(Boolean)
+                .join(' · ')}
+            </Text>
+          </Box>
+          {p.status !== OFFLINE && !p.isSelf && (
+            <Button
+              key={`msg:${p.ref ?? p.name}`}
+              plain
+              onPress={() => void update($, compose, c => (c === p.name ? null : p.name))}
+            >
+              <Text color="#3987e5">✉</Text>
+            </Button>
+          )}
+          {p.status !== OFFLINE && (
+            <Button
+              key={`copy:${p.ref ?? p.name}`}
+              plain
+              onPress={press => void copy($, p.name, press.surface)}
+            >
+              <Text color="#199e70">⧉</Text>
+            </Button>
+          )}
+        </Box>
+        {composeTo === p.name && composer(p.name)}
+      </Box>
+    )
+
+    const alerts =
+      found.length === 0 ? null : (
+        <Box
+          key="card:alerts"
+          flexDirection="column"
+          borderStyle="round"
+          borderColor="warning"
+          paddingX={1}
+        >
+          <Text size="caption" weight="semibold" color="warning">
+            ⚠ {found.length === 1 ? 'POSSIBLE CONFLICT' : `${found.length} POSSIBLE CONFLICTS`}
+          </Text>
+          {found.map(c => (
+            <Text key={`alert:${conflictKey(c)}`} size="footnote" wrap="wrap">
+              {c.kind === 'folder' ? '⇄ ' : '✎ '}
+              {conflictText(c)}
+            </Text>
+          ))}
+        </Box>
+      )
+
+    const inboxCard = card(
+      'inbox',
+      unread > 0 ? `Inbox · ${unread} new` : 'Inbox',
+      unread > 0 ? (
+        <Button key="inbox:read" plain dimColor onPress={() => void markRead($, messages)}>
+          ✓ Mark read
+        </Button>
+      ) : null,
+      <Box flexDirection="column">
+        {messages.length === 0 && (
+          <Text size="caption" dimColor>
+            Messages other sessions send here show up in this list.
+          </Text>
+        )}
+        {messages
+          .slice(-INBOX_SHOWN)
+          .reverse()
+          .map(m => (
+            <Box key={`inbox:${m.at}:${m.from}`} flexDirection="column">
+              <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                <Text size="footnote" weight={m.at > seenAt ? 'bold' : 'medium'}>
+                  {m.at > seenAt ? <Text color="#3987e5">● </Text> : ''}
+                  {m.from} <Text dimColor>· {fmtAge(now - m.at)}</Text>
+                </Text>
+                <Button
+                  key={`reply:${m.at}:${m.from}`}
+                  plain
+                  dimColor
+                  onPress={() => void update($, compose, () => m.from)}
+                >
+                  ↩ Reply
+                </Button>
+              </Box>
+              <Text size="caption" dimColor wrap="truncate-end">
+                {m.text.replace(/\s+/g, ' ')}
+              </Text>
+              {composeTo === m.from && !live.some(p => p.name === m.from) && composer(m.from)}
+            </Box>
+          ))}
+      </Box>,
+    )
+
+    const topProject = costs.byProject[0]?.usd ?? 0
+    const spendCard = card(
+      'spend',
+      'Spend',
+      <Text size="caption" dimColor>
+        {costs.sessions} session{costs.sessions === 1 ? '' : 's'} · 7 days
+      </Text>,
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap" gap={1}>
+          <Box flexDirection="column">
+            <Text size="heading" weight="semibold" tabular>
+              {fmtUsd(costs.todayUsd)}
+            </Text>
+            <Text size="caption" dimColor>
+              Today
+            </Text>
+          </Box>
+          <Box flexDirection="column">
+            <Text size="heading" weight="semibold" tabular>
+              {fmtUsd(costs.weekUsd)}
+            </Text>
+            <Text size="caption" dimColor>
+              Last 7 days
+            </Text>
+          </Box>
+        </Box>
+        {costs.byProject.map(p => (
+          <Box key={`spend:${p.project}`} flexDirection="row" alignItems="center" gap={1}>
+            <Box width="34%" flexShrink={0}>
+              <Text size="footnote" wrap="truncate-end">
+                {p.project}
+              </Text>
+            </Box>
+            <Box flexGrow={1}>
+              {Svg ? (
+                <Svg
+                  source={meterSvg(topProject === 0 ? 0 : p.usd / topProject)}
+                  alt={`${p.project} ${fmtUsd(p.usd)} today`}
+                />
+              ) : (
+                <Text color="#3987e5">
+                  {bar(topProject === 0 ? 0 : (p.usd / topProject) * 100, Math.max(4, barWidth - 8))}
+                </Text>
+              )}
+            </Box>
+            <Text size="footnote" tabular>
+              {fmtUsd(p.usd)}
+            </Text>
+          </Box>
+        ))}
+        <Text size="caption" dimColor>
+          Counts sessions that run session-radar.
+        </Text>
+        {writeError && (
+          <Text size="caption" color="warning" wrap="wrap">
+            ⚠ Could not save this session's spend and edits: {writeError}
+          </Text>
+        )}
+      </Box>,
     )
 
     const sessions = card(
@@ -1096,11 +1605,13 @@ export const register: Register = on => {
             >
               <Text color={shownView === tab.view ? undefined : tab.color}>{tab.glyph}</Text>{' '}
               {tab.label}
+              {tab.view === 'sessions' && unread > 0 ? ` ✉${unread}` : ''}
+              {tab.view === 'sessions' && found.length > 0 ? ' ⚠' : ''}
             </Button>
           ))}
         </Box>
         <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-          <Button key="act:refresh" hotkey="r" plain onPress={() => void refreshAll($, true)}>
+          <Button key="act:refresh" hotkey="r" plain onPress={() => background($, 'refresh', refreshAll($, true))}>
             <Text color="#3987e5">⟳</Text> Refresh
           </Button>
           {who.name && (
@@ -1124,6 +1635,14 @@ export const register: Register = on => {
             <Text color="#9085e9">{isStatus ? '◉' : '○'}</Text> Status line
           </Button>
           <Button
+            key="act:notify"
+            hotkey="n"
+            plain
+            onPress={() => void update($, isNotifyOn, v => !v)}
+          >
+            <Text color="#d95926">{isNotify ? '◉' : '○'}</Text> Notify
+          </Button>
+          <Button
             key="act:close"
             role="dismiss"
             plain
@@ -1140,15 +1659,16 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {header}
         {toolbar}
+        {alerts}
         {cards[shownView]}
       </Box>
     )
 
     if (Svg === null) {
       return pick({
-        all: [self, sessions, context, spend, tokens, toolCard],
-        sessions: [self, sessions],
-        usage: [context, spend, tokens],
+        all: [self, sessions, inboxCard, context, spend, spendCard, tokens, toolCard],
+        sessions: [self, sessions, inboxCard],
+        usage: [context, spend, spendCard, tokens],
         tools: [toolCard],
       })
     }
@@ -1339,9 +1859,9 @@ export const register: Register = on => {
     )
 
     return pick({
-      all: [self, overview, sessions, richTokens, richTools],
-      sessions: [self, sessions],
-      usage: [overview, richTokens],
+      all: [self, overview, sessions, inboxCard, spendCard, richTokens, richTools],
+      sessions: [self, sessions, inboxCard],
+      usage: [overview, spendCard, richTokens],
       tools: [richTools],
     })
   })

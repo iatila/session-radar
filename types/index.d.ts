@@ -59,6 +59,37 @@ export type Tools = Record<string, ToolStat>
 
 export type View = 'all' | 'sessions' | 'usage' | 'tools'
 
+export type InboxItem = { from: string; text: string; at: number }
+
+export type Conflict = {
+  kind: 'folder' | 'file'
+  project: string
+  target: string
+  sessions: string[]
+}
+
+export type Spend = {
+  todayUsd: number
+  weekUsd: number
+  byProject: { project: string; usd: number }[]
+  sessions: number
+  updatedAt: number | null
+}
+
+export type LedgerEdit = { file: string; at: number }
+
+export type LedgerFile = {
+  sessionId: string
+  name: string | null
+  title: string | null
+  cwd: string
+  project: string
+  day: string
+  usd: number
+  edits: LedgerEdit[]
+  updatedAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'session-radar': {
@@ -69,7 +100,14 @@ declare module 'claude-code' {
       tools: Shaped<Tools>
       isStatusOn: boolean
       isOfflineShown: boolean
+      isNotifyOn: boolean
       view: View
+      inbox: Shaped<InboxItem[]>
+      inboxSeenAt: number
+      conflicts: Shaped<Conflict[]>
+      spend: Shaped<Spend>
+      compose: string | null
+      ledgerError: string | null
     }
   }
 }

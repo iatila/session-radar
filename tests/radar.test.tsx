@@ -212,6 +212,12 @@ test('the pane shows tab titles grouped by project, on every surface', async ($,
       expect([surface, String(text), found !== undefined]).toEqual([surface, String(text), true])
     }
     expect(await ui.find({ type: 'Text', text: /Fix login/ })).toBeFalsy()
+
+    await ui.press({ key: 'tab:tools' })
+    expect(await ui.find({ type: 'Text', text: /^Bash$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /blog-58/ })).toBeFalsy()
+    await ui.press({ key: 'tab:all' })
+    expect(await ui.find({ type: 'Text', text: /blog-58/ })).toBeTruthy()
     await ui.unmount()
   }
 })

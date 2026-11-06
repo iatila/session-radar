@@ -10,6 +10,7 @@ import type {
   Tools,
   Turns,
   Usage,
+  View,
 } from '../types'
 
 const PANE = 'session-radar'
@@ -91,6 +92,15 @@ const tools = atom(
   { shape: 'tools-1' },
 )
 const isStatusOn = atom({ plugin: 'session-radar', key: 'isStatusOn' } as const, true)
+const view = atom({ plugin: 'session-radar', key: 'view' } as const, 'all' as View)
+
+const TABS: { view: View; glyph: string; label: string; color: string }[] = [
+  { view: 'all', glyph: '◉', label: 'All', color: '#d95926' },
+  { view: 'sessions', glyph: '⇄', label: 'Sessions', color: '#3987e5' },
+  { view: 'usage', glyph: '◔', label: 'Usage', color: '#199e70' },
+  { view: 'tools', glyph: '⚒', label: 'Tools', color: '#9085e9' },
+]
+
 const isOfflineShown = atom(
   { plugin: 'session-radar', key: 'isOfflineShown' } as const,
   false,
@@ -285,6 +295,27 @@ export const meterSvg = (fraction: number, width = 160, height = 8): string => {
     height,
     `<rect x="0" y="0" width="${width}" height="${height}" rx="${height / 2}" fill="${INK_MUTED}" fill-opacity="0.18"/>` +
       (w > 0 ? `<rect x="0" y="0" width="${w.toFixed(2)}" height="${height}" rx="${height / 2}" fill="${ACCENT}"/>` : ''),
+  )
+}
+
+export const logoSvg = (size = 24): string => {
+  const c = size / 2
+  const r = c - 1
+  const sweep = (deg: number) => {
+    const a = ((deg - 90) * Math.PI) / 180
+
+    return `${(c + r * Math.cos(a)).toFixed(2)},${(c + r * Math.sin(a)).toFixed(2)}`
+  }
+
+  return svg(
+    size,
+    size,
+    `<defs><linearGradient id="s" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d95926" stop-opacity="0.2"/><stop offset="1" stop-color="#d95926" stop-opacity="0.95"/></linearGradient></defs>` +
+      `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${INK_MUTED}" stroke-opacity="0.45" stroke-width="1.2"/>` +
+      `<circle cx="${c}" cy="${c}" r="${(r * 0.55).toFixed(2)}" fill="none" stroke="${INK_MUTED}" stroke-opacity="0.35" stroke-width="1"/>` +
+      `<path d="M${c},${c}L${sweep(-15)}A${r},${r} 0 0 1 ${sweep(75)}Z" fill="url(#s)"/>` +
+      `<circle cx="${c}" cy="${c}" r="1.6" fill="#d95926"/>` +
+      `<circle cx="${(c + r * 0.62 * Math.cos((-50 * Math.PI) / 180)).toFixed(2)}" cy="${(c + r * 0.62 * Math.sin((-50 * Math.PI) / 180)).toFixed(2)}" r="2" fill="${SERIES.input}"/>`,
   )
 }
 
@@ -788,6 +819,7 @@ export const register: Register = on => {
     const others = dir.peers.filter(p => !p.isSelf)
     const live = others.filter(p => p.status !== OFFLINE)
     const offlineCount = others.length - live.length
+    const busyCount = live.filter(p => p.status === BUSY).length
     const shown = dir.peers.filter(p => isOffline || p.status !== OFFLINE)
     const groups = groupPeers(shown)
 
@@ -865,7 +897,11 @@ export const register: Register = on => {
     const sessions = card(
       'sessions',
       `Sessions · ${live.length} live`,
-      <Button key="refresh" label="Refresh" plain onPress={() => void refreshAll($, true)} />,
+      busyCount > 0 ? (
+        <Text size="caption" color="success">
+          ● {busyCount} busy
+        </Text>
+      ) : null,
       <Box flexDirection="column" gap={1}>
         {groups.length === 0 && <Text dimColor>looking for sessions…</Text>}
         {groups.map(g => (
@@ -876,33 +912,23 @@ export const register: Register = on => {
             {g.peers.map(peerRow)}
           </Box>
         ))}
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-          <Text size="caption" dimColor>
-            {dir.refreshedAt === null ? '' : `updated ${fmtAge(now - dir.refreshedAt)}`}
-          </Text>
-          {offlineCount > 0 && (
-            <Button
-              key="toggle-offline"
-              label={isOffline ? 'Hide offline' : `Offline (${offlineCount})`}
-              plain
-              onPress={() => void update($, isOfflineShown, v => !v)}
-            />
-          )}
-        </Box>
+        {offlineCount > 0 && (
+          <Button
+            key="toggle-offline"
+            plain
+            dimColor
+            onPress={() => void update($, isOfflineShown, v => !v)}
+          >
+            ○ {isOffline ? 'Hide offline' : `Show offline (${offlineCount})`}
+          </Button>
+        )}
       </Box>,
     )
 
     const self = card(
       'self',
       'This session',
-      who.name ? (
-        <Button
-          key="copy:self"
-          label="Copy name"
-          plain
-          onPress={press => void copy($, who.name ?? '', press.surface)}
-        />
-      ) : null,
+      <Text color="claude">◆</Text>,
       <Box flexDirection="column">
         <Text weight="semibold" wrap="truncate-end">
           {who.title ?? who.name ?? 'name pending…'}
@@ -1037,17 +1063,94 @@ export const register: Register = on => {
       </Box>,
     )
 
-    if (Svg === null) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          {self}
-          {sessions}
-          {context}
-          {spend}
-          {tokens}
-          {toolCard}
+    const shownView = await read($, view)
+    const isStatus = await read($, isStatusOn)
+
+    const header = (
+      <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {Svg ? (
+            <Svg source={logoSvg()} alt="Session radar" width={24} height={24} />
+          ) : (
+            <Text color="claude">◎</Text>
+          )}
+          <Text size="heading" weight="bold">
+            Session radar
+          </Text>
         </Box>
-      )
+        <Text size="caption" dimColor>
+          {dir.refreshedAt === null ? '' : `updated ${fmtAge(now - dir.refreshedAt)}`}
+        </Text>
+      </Box>
+    )
+
+    const toolbar = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="row" flexWrap="wrap" gap={1}>
+          {TABS.map((tab, i) => (
+            <Button
+              key={`tab:${tab.view}`}
+              hotkey={String(i + 1)}
+              variant={shownView === tab.view ? 'primary' : 'secondary'}
+              onPress={() => void update($, view, () => tab.view)}
+            >
+              <Text color={shownView === tab.view ? undefined : tab.color}>{tab.glyph}</Text>{' '}
+              {tab.label}
+            </Button>
+          ))}
+        </Box>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+          <Button key="act:refresh" hotkey="r" plain onPress={() => void refreshAll($, true)}>
+            <Text color="#3987e5">⟳</Text> Refresh
+          </Button>
+          {who.name && (
+            <Button
+              key="act:copy"
+              hotkey="c"
+              plain
+              onPress={press => void copy($, who.name ?? '', press.surface)}
+            >
+              <Text color="#199e70">⧉</Text> Copy name
+            </Button>
+          )}
+          <Button
+            key="act:status"
+            hotkey="s"
+            plain
+            onPress={() =>
+              void update($, isStatusOn, v => !v).then(() => refreshStatus($))
+            }
+          >
+            <Text color="#9085e9">{isStatus ? '◉' : '○'}</Text> Status line
+          </Button>
+          <Button
+            key="act:close"
+            role="dismiss"
+            plain
+            dimColor
+            onPress={() => void $.ui.close({ id: PANE })}
+          >
+            ✕ Close
+          </Button>
+        </Box>
+      </Box>
+    )
+
+    const pick = (cards: Record<View, RenderChildren[]>) => (
+      <Box flexDirection="column" gap={1}>
+        {header}
+        {toolbar}
+        {cards[shownView]}
+      </Box>
+    )
+
+    if (Svg === null) {
+      return pick({
+        all: [self, sessions, context, spend, tokens, toolCard],
+        sessions: [self, sessions],
+        usage: [context, spend, tokens],
+        tools: [toolCard],
+      })
     }
 
     const limitOf = (kind: string) => u.rateLimits.find(r => r.kind === kind)
@@ -1235,14 +1338,11 @@ export const register: Register = on => {
       </Box>,
     )
 
-    return (
-      <Box flexDirection="column" gap={1}>
-        {self}
-        {overview}
-        {sessions}
-        {richTokens}
-        {richTools}
-      </Box>
-    )
+    return pick({
+      all: [self, overview, sessions, richTokens, richTools],
+      sessions: [self, sessions],
+      usage: [overview, richTokens],
+      tools: [richTools],
+    })
   })
 }

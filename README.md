@@ -5,7 +5,10 @@ and the name to message it by. Plus context, cost, rate limits, tokens and
 tool usage for the session you are in, in a pane beside the chat.**
 
 ```
-╭ THIS SESSION ─────────────────────── Copy name ╮
+ ◎ Session radar                       updated 12s ago
+ [◉ All] [⇄ Sessions] [◔ Usage] [⚒ Tools]
+ ⟳ Refresh   ⧉ Copy name   ◉ Status line   ✕ Close
+╭ THIS SESSION ──────────────────────────────── ◆ ╮
 │ Checkout refactor                              │
 │ webshop-04 · claude-opus-5-5 · up 2h14m        │
 ╰────────────────────────────────────────────────╯
@@ -18,7 +21,7 @@ tool usage for the session you are in, in a pane beside the chat.**
 │  Cost      Turns    Avg turn   Per turn        │
 │  Context after each turn  ▁▂▂▃▃▄▅▅▆▆           │
 ╰────────────────────────────────────────────────╯
-╭ SESSIONS · 4 LIVE ───────────────────── Refresh ╮
+╭ SESSIONS · 4 LIVE ──────────────────── ● 1 busy ╮
 │ ▾ webshop 3                                    │
 │   ◆ Checkout refactor                          │
 │     webshop-04 · this session · 2h ago         │
@@ -91,6 +94,11 @@ early-access feature; check `claude --version` if the install refuses the
 hooks module.
 
 ## Use
+
+Inside the pane, the tabs filter what is shown (**All**, **Sessions**,
+**Usage**, **Tools**; keys `1` to `4` while the pane has focus), and the
+actions under them refresh (`r`), copy this session's name (`c`), switch the
+status line on or off (`s`) and close the pane.
 
 | Command | What it does |
 | --- | --- |

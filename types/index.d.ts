@@ -57,6 +57,8 @@ export type ToolStat = { calls: number; errors: number; denied: number }
 
 export type Tools = Record<string, ToolStat>
 
+export type View = 'all' | 'sessions' | 'usage' | 'tools'
+
 declare module 'claude-code' {
   interface PluginState {
     'session-radar': {
@@ -67,6 +69,7 @@ declare module 'claude-code' {
       tools: Shaped<Tools>
       isStatusOn: boolean
       isOfflineShown: boolean
+      view: View
     }
   }
 }

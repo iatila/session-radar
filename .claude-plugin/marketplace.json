@@ -1,0 +1,6 @@
+{
+  "name": "session-radar",
+  "owner": { "name": "iatila" },
+  "description": "Session radar: peer session names for SendMessage plus context, cost, token and tool stats in a side pane.",
+  "plugins": [{ "name": "session-radar", "source": "./" }]
+}

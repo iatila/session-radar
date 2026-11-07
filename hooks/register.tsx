@@ -54,6 +54,8 @@ const OFFLINE = 'offline'
 const BUSY = 'busy'
 const REMOTE_GROUP = 'Remote Control'
 const SELF_LINE = /^This session is (.+?) \[([^\]]+)\]/
+const FINISHED_OPTION = 'finishedNotices'
+const FINISHED_EVERYWHERE = 'all-projects'
 const WINDOWS_OS = 'Windows_NT'
 const CLIPBOARD_ENV = 'SESSION_RADAR_CLIP'
 const CLIPBOARD_TIMEOUT_MS = 5_000
@@ -856,7 +858,7 @@ async function notify($: EngineInterface, text: string): Promise<void> {
   if (!sent.isSent) $.ui.toast(text)
 }
 
-async function watch($: EngineInterface): Promise<void> {
+async function watch($: EngineInterface, isFinishedEverywhere: boolean): Promise<void> {
   const root = await configRoot($)
   if (root === null) return
   const who = await read($, identity)
@@ -873,7 +875,7 @@ async function watch($: EngineInterface): Promise<void> {
     const hasFinished =
       !isFirstPass &&
       entry.sessionId !== who.sessionId &&
-      normalizePath(entry.cwd) === ownFolder &&
+      (isFinishedEverywhere || normalizePath(entry.cwd) === ownFolder) &&
       before === BUSY &&
       entry.status !== BUSY
     if (hasFinished) {
@@ -990,7 +992,9 @@ async function setTitle($: EngineInterface, title: string | undefined): Promise<
   }))
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isFinishedEverywhere = options[FINISHED_OPTION] === FINISHED_EVERYWHERE
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
@@ -1003,7 +1007,7 @@ export const register: Register = on => {
     await update($, identity, who => ({ ...who, sessionId }))
     background($, 'start', refreshAll($, true).then(() => writeLedger($, {})))
     $.clock.every(REFRESH_EVERY_MS, () => background($, 'refresh', refreshAll($, false)))
-    $.clock.every(WATCH_EVERY_MS, () => background($, 'watch', watch($)))
+    $.clock.every(WATCH_EVERY_MS, () => background($, 'watch', watch($, isFinishedEverywhere)))
 
     return started
   })

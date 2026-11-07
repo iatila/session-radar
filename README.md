@@ -25,8 +25,9 @@ edits collide.
 
 **2. You stop checking tabs.** You switch to something else. When the test
 session goes from busy to idle you get *"webshop-6d finished: Product search
-tests"*. Only sessions in the same project notify you, so other projects stay
-quiet.
+tests"*. By default only sessions in the same project notify you; with three
+or four VS Code windows open, switch **Finished notices** to `all-projects`
+in `/config` and hear from every window while you work in one.
 
 **3. Agents hand work to each other.** Press ⧉ next to a session to copy its
 name, then tell your agent *"send the failing test output to `webshop-6d`"*.
@@ -64,9 +65,9 @@ Copy button.
 It tells you when something needs you, as a desktop notification (or a toast
 where there is none):
 
-- **A session finished**: another session in the same project folder went
-  from busy to idle. Sessions in other folders notify their own folder's
-  sessions, not this one.
+- **A session finished**: another session went from busy to idle. Which
+  sessions count is a setting (below): only this project's folder
+  (default), or every open session in any project.
 - **A possible conflict**: two sessions started working in the same folder,
   or touched the same file.
 - **A message arrived**: a toast with the sender and the first line.
@@ -165,6 +166,12 @@ the pane.
 | `/radar status on` / `off` | Show or hide the status line summary |
 | `/radar notify on` / `off` | Turn the notifications on or off |
 
+**Settings.** `/config` lists the mod's options; a change applies at once.
+
+| Setting | Values | What it does |
+| --- | --- | --- |
+| **Finished notices** | `this-project` (default), `all-projects` | Which sessions tell you when they finish: only those in this session's project folder, or every open session. Pick `all-projects` when several VS Code windows each hold a project and you want to hear from the others while you work in one. |
+
 **Messaging another session.** Press ✉ next to the session you want, type,
 press Enter. The message goes straight to that session, no model call on your
 side. Or press ⧉ to copy its name and ask your agent: *"Use SendMessage to
@@ -194,8 +201,9 @@ window is used and when it resets.
   else the last generated one), re-read at most every 5 minutes and skipped
   above 4 MB.
 - **Finished sessions** are spotted by reading the session registry every 10
-  seconds and comparing each session's status with the last reading; only
-  sessions whose folder matches this session's raise a notice.
+  seconds and comparing each session's status with the last reading; with
+  `this-project`, only sessions whose folder matches this session's raise a
+  notice.
 - **Spend, edits and titles across sessions** go through a small ledger:
   every session that runs session-radar writes one file a day,
   `~/.claude/session-radar/ledger/<day>/<session id>.json`, holding its own

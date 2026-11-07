@@ -1,9 +1,31 @@
 {
   "name": "session-radar",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A side pane with this session's peer name, the other open sessions you can message, context fill, cost, rate limits, tokens and tool-call stats.",
-  "author": { "name": "iatila" },
+  "author": {
+    "name": "iatila"
+  },
   "license": "MIT",
-  "keywords": ["stats", "tokens", "cost", "context", "sessions", "agents", "sendmessage"],
+  "keywords": [
+    "stats",
+    "tokens",
+    "cost",
+    "context",
+    "sessions",
+    "agents",
+    "sendmessage"
+  ],
+  "userConfig": {
+    "finishedNotices": {
+      "type": "string",
+      "title": "Finished notices",
+      "description": "Which sessions tell you when they finish: only those in this session's project folder, or every open session in any project.",
+      "default": "this-project",
+      "options": [
+        "this-project",
+        "all-projects"
+      ]
+    }
+  },
   "types": "./types/index.d.ts"
 }

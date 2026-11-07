@@ -378,3 +378,55 @@ test('Copy name falls back to the host clipboard where the surface has none', as
   expect(ran[0]?.env?.SESSION_RADAR_CLIP).toBe('webshop-04')
   expect(toasts).toContain('Copied webshop-04')
 })
+
+test('with finishedNotices all-projects, a session in another project notifies too', { options: { finishedNotices: 'all-projects' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const files = new Map<string, string>()
+  const registry = (status: string) =>
+    files.set(
+      `${SESSIONS}/3.json`,
+      JSON.stringify({ name: 'blog-58', sessionId: 'blog-id', cwd: '/work/blog', startedAt: 0, status }),
+    )
+  registry('busy')
+  const notices: string[] = []
+  on('command.register', () => ({ value: { command: 'radar' } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.notify', (_, e) => {
+    notices.push(e.text)
+
+    return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: SELF_ID }))
+  on('session.cwd', () => ({ value: '/work/webshop' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  on('fs.exists', (_, e) => {
+    const path = norm(e.path)
+
+    return { value: files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)) }
+  })
+  on('fs.list', (_, e) => {
+    const dir = `${norm(e.path)}/`
+
+    return {
+      value: [...files.keys()]
+        .filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/'))
+        .map(k => ({ name: k.slice(dir.length), kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })),
+    }
+  })
+  on('fs.read', (_, e) => ({ value: files.get(norm(e.path)) ?? '' }))
+  on('fs.write', () => ({ value: undefined }))
+  on('tool.call', { tool: 'ListAgents' }, () => ({ result: { listing: LISTING } }))
+  on('tool.call', () => ({ result: {} }))
+
+  await $.session.start({ cwd: '/work/webshop', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  await clock.advance(10_000)
+  registry('idle')
+  await clock.advance(10_000)
+
+  expect(notices.some(n => n.startsWith('blog-58 finished'))).toBe(true)
+})

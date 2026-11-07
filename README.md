@@ -87,9 +87,10 @@ It also pins a one-line summary under the prompt:
 And it tells you when something needs you, as a desktop notification (or a
 toast where the terminal has none):
 
-- **A session finished.** When another session goes from busy to idle:
-  *"webshop-6d finished: Payment webhook retries"*. Run several agents at once
-  and stop checking tabs.
+- **A session finished.** When another session in the same project folder
+  goes from busy to idle: *"webshop-6d finished: Payment webhook retries"*.
+  Run several agents at once and stop checking tabs. Sessions in other
+  folders do not notify here; they notify the sessions of their own folder.
 - **A possible conflict.** When two sessions start working in the same folder,
   or touch the same file: *"cart.ts was edited by webshop-04 and webshop-6d"*.
 - **A message arrived.** A toast with the sender and the first line.
@@ -167,7 +168,8 @@ window is used and when it resets.
   else the last generated one), re-read at most every 5 minutes and skipped
   above 4 MB.
 - **Finished sessions** are spotted by reading the session registry every 10
-  seconds and comparing each session's status with the last reading.
+  seconds and comparing each session's status with the last reading; only
+  sessions whose folder matches this session's raise a notice.
 - **Spend, edits and titles across sessions** go through a small ledger:
   every session that runs session-radar writes one file a day,
   `~/.claude/session-radar/ledger/<day>/<session id>.json`, holding its own
@@ -193,8 +195,14 @@ window is used and when it resets.
   shows as pending and the rest keeps working.
 - The registry and transcript layout are Claude Code internals, not a public
   API. If they move, titles and project groups fall back to peer names.
-- Copy writes to the terminal clipboard; where a surface does not pass
-  clipboard writes through, a toast shows the name instead.
+- Copy writes to the terminal clipboard. VS Code, the desktop app and the
+  mobile app have no clipboard path for mods yet, so there the mod runs the
+  machine's own clipboard tool (PowerShell `Set-Clipboard` on Windows,
+  `pbcopy`, `wl-copy` or `xclip` elsewhere). If none of them works, a toast
+  shows the name instead.
+- The status line summary is plain text: clicking or right-clicking it does
+  nothing, because mods cannot attach actions to it. Use `/radar name` to
+  copy the name, or `/radar` to open the pane.
 - Spend and edit conflicts only count sessions that run session-radar. A
   session started before you installed it is not counted until it restarts.
 - A day of spend is your local calendar day. A session that was resumed from

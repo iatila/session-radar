@@ -129,6 +129,10 @@ test('notifies when a peer finishes, logs edits, reads the inbox and sends a mes
       `${SESSIONS}/2.json`,
       JSON.stringify({ name: 'webshop-6d', sessionId: PEER_ID, cwd: '/work/webshop', startedAt: 0, status }),
     )
+    files.set(
+      `${SESSIONS}/3.json`,
+      JSON.stringify({ name: 'blog-58', sessionId: 'blog-id', cwd: '/work/blog', startedAt: 0, status }),
+    )
   }
   registry('busy')
 
@@ -196,6 +200,7 @@ test('notifies when a peer finishes, logs edits, reads the inbox and sends a mes
   registry('idle')
   await clock.advance(10_000)
   expect(notices.some(n => n.startsWith('webshop-6d finished'))).toBe(true)
+  expect(notices.some(n => n.startsWith('blog-58 finished'))).toBe(false)
 
   await $.session.receive({
     origin: { kind: 'peer' },
@@ -328,4 +333,48 @@ test('an unreadable transcript does not stop the scan, and a ledger title wins',
   const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await again.find({ type: 'Text', text: /webshop-6d/ })).toBeTruthy()
   await again.unmount()
+})
+
+test('Copy name falls back to the host clipboard where the surface has none', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const ran: { argv: readonly string[]; env: Record<string, string> | undefined }[] = []
+  const toasts: string[] = []
+  on('command.register', () => ({ value: { command: 'radar' } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('ui.copy', () => ({ value: { isCopied: false as const, reason: 'no-clipboard' as const } }))
+  on('process.run', (_, e) => {
+    ran.push({ argv: e.argv, env: e.init?.env })
+
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: SELF_ID }))
+  on('session.cwd', () => ({ value: '/work/webshop' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('env.get', (_, e) => ({
+    value: ({ HOME, OS: 'Windows_NT' } as Record<string, string | undefined>)[e.name],
+  }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.write', () => ({ value: undefined }))
+  on('tool.call', { tool: 'ListAgents' }, () => ({ result: { listing: LISTING } }))
+  on('tool.call', () => ({ result: {} }))
+
+  await $.session.start({ cwd: '/work/webshop', surface: 'vscode', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  await ui.press({ key: 'act:copy' })
+  await clock.settle()
+  await ui.unmount()
+
+  expect(ran.map(r => r.argv[0])).toEqual(['powershell.exe'])
+  expect(ran[0]?.env?.SESSION_RADAR_CLIP).toBe('webshop-04')
+  expect(toasts).toContain('Copied webshop-04')
 })

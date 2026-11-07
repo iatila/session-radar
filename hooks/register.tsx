@@ -54,6 +54,17 @@ const OFFLINE = 'offline'
 const BUSY = 'busy'
 const REMOTE_GROUP = 'Remote Control'
 const SELF_LINE = /^This session is (.+?) \[([^\]]+)\]/
+const WINDOWS_OS = 'Windows_NT'
+const CLIPBOARD_ENV = 'SESSION_RADAR_CLIP'
+const CLIPBOARD_TIMEOUT_MS = 5_000
+const CLIPBOARD_TOOLS_WINDOWS: readonly (readonly string[])[] = [
+  ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `Set-Clipboard -Value $env:${CLIPBOARD_ENV}`],
+]
+const CLIPBOARD_TOOLS_UNIX: readonly (readonly string[])[] = [
+  ['pbcopy'],
+  ['wl-copy'],
+  ['xclip', '-selection', 'clipboard'],
+]
 
 const ZERO_TOKENS: Tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 const HISTORY_MAX = 40
@@ -853,13 +864,18 @@ async function watch($: EngineInterface): Promise<void> {
   const { now, day } = await today($)
   const dir = await read($, directory)
   const titleOf = new Map(dir.peers.map(p => [p.name, p.title]))
+  const ownFolder = normalizePath(await $.session.cwd())
 
   const isFirstPass = lastStatus.size === 0
   for (const entry of registry) {
     const before = lastStatus.get(entry.sessionId)
     lastStatus.set(entry.sessionId, entry.status)
     const hasFinished =
-      !isFirstPass && entry.sessionId !== who.sessionId && before === BUSY && entry.status !== BUSY
+      !isFirstPass &&
+      entry.sessionId !== who.sessionId &&
+      normalizePath(entry.cwd) === ownFolder &&
+      before === BUSY &&
+      entry.status !== BUSY
     if (hasFinished) {
       const title = titleOf.get(entry.name)
       await notify($, `${entry.name} finished${title ? `: ${title}` : ''}`)
@@ -927,16 +943,39 @@ async function receive($: EngineInterface, text: string): Promise<void> {
   await refreshStatus($)
 }
 
+// $.ui.copy has no clipboard path on a remote surface (VS Code, desktop,
+// mobile) yet; the session runs on the same machine, so its own tool is tried.
+async function hostCopy($: EngineInterface, text: string): Promise<boolean> {
+  const isWindows = (await $.env.get('OS')) === WINDOWS_OS
+  const tools = isWindows ? CLIPBOARD_TOOLS_WINDOWS : CLIPBOARD_TOOLS_UNIX
+  for (const argv of tools) {
+    try {
+      const ran = await $.process.run(argv, {
+        stdin: text,
+        env: { [CLIPBOARD_ENV]: text },
+        timeoutMs: CLIPBOARD_TIMEOUT_MS,
+      })
+      if (ran.exitCode === 0) return true
+      $.ui.log(`session-radar: ${argv[0]} exited ${ran.exitCode}: ${ran.stderr.trim()}`, { to: 'debug' })
+    } catch (error) {
+      $.ui.log(`session-radar: ${argv[0]} not usable: ${String(error)}`, { to: 'debug' })
+    }
+  }
+
+  return false
+}
+
 async function copy(
   $: EngineInterface,
   text: string,
   surface: RenderSurface | undefined,
 ): Promise<void> {
   const done = await $.ui.copy({ text, surface })
+  const isCopied = done.isCopied || (done.reason !== 'refused' && (await hostCopy($, text)))
   $.ui.toast(
-    done.isCopied
+    isCopied
       ? `Copied ${text}`
-      : `${text} (clipboard not reachable here: ${done.reason})`,
+      : `${text} (clipboard not reachable here${done.isCopied ? '' : `: ${done.reason}`})`,
   )
 }
 

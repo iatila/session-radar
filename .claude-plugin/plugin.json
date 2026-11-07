@@ -1,6 +1,6 @@
 {
   "name": "session-radar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A side pane with this session's peer name, the other open sessions you can message, context fill, cost, rate limits, tokens and tool-call stats.",
   "author": { "name": "iatila" },
   "license": "MIT",

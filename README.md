@@ -1,8 +1,77 @@
 # session-radar
 
-**See every Claude Code session you have open, which editor tab each one is,
-and the name to message it by. Plus context, cost, rate limits, tokens and
-tool usage for the session you are in, in a pane beside the chat.**
+**A tiny mod that keeps an eye on every Claude Code session you have open, so
+you don't have to.**
+
+Four tabs open, four agents working. Which one is `webshop-6d`? Has the test
+run finished yet? Are two of them editing the same file? session-radar answers
+all three in a pane beside the chat, and taps you on the shoulder when
+something needs you.
+
+<p align="center">
+  <img src="docs/pane.png" width="380" alt="The session-radar pane in VS Code: a conflict warning, this session, context and rate-limit rings, the open sessions grouped by project, an inbox message, spend and token mix">
+</p>
+
+```
+/plugin install session-radar --marketplace iatila/session-radar
+```
+
+## A day with session-radar
+
+**1. Two agents reach for the same file.** You asked one session to refactor
+the cart and another to fix the checkout tests. Both open `cart.ts`. An amber
+warning appears on top of the pane (as in the picture above), and a notification tells you before the
+edits collide.
+
+**2. You stop checking tabs.** You switch to something else. When the test
+session goes from busy to idle you get *"webshop-6d finished: Product search
+tests"*. Only sessions in the same project notify you, so other projects stay
+quiet.
+
+**3. Agents hand work to each other.** Press ⧉ next to a session to copy its
+name, then tell your agent *"send the failing test output to `webshop-6d`"*.
+Or press ✉ and type the message yourself, with no model call. The answer
+lands in your Inbox.
+
+All the while a one-line summary sits under the prompt:
+
+<img src="docs/statusline.png" alt="Status line: webshop-04, context 42 %, $4.67, 5h limit 23 %, 3 live sessions with 1 busy, 1 unread message, 1 conflict">
+
+## Why
+
+When several Claude Code sessions run at once, agents can message each other
+with `SendMessage`, but only by a peer name such as `webshop-6d`. Nothing on
+screen tells you which editor tab that name belongs to, and the tab title
+("Payment webhook retries") is not something an agent can address.
+
+session-radar puts the two side by side: every open session, grouped by
+project folder, shown by its tab title with its peer name underneath and a
+Copy button.
+
+## What it shows
+
+| Card | Contents |
+| --- | --- |
+| **This session** | Tab title, peer name, model, uptime |
+| **Overview** | Context fill, 5-hour and 7-day rate limits as gauges (green, then amber from 60 %, red from 85 %), time to reset; cost, turns, average turn time, cost per turn; context fill after each turn; duration of each turn |
+| **Sessions** | Every open session on this machine, grouped by project folder: tab title, peer name, busy / idle, age, Copy. Your own session is marked ◆, busy ones ●. Offline Remote Control sessions are hidden behind a toggle |
+| **Possible conflicts** | Shown on top in amber when two sessions are busy in the same project folder at once, or when two sessions edited the same file in the last 30 minutes |
+| **Inbox** | Messages other sessions sent to this one, newest first, with Reply |
+| **Spend** | Today and the last 7 days across all your sessions, and today per project |
+| **Tokens** | Input, output, cache read and cache write as a stacked bar, cache hit rate, subagent turns on their own line |
+| **Tools** | The most used tools with call and error counts |
+
+It tells you when something needs you, as a desktop notification (or a toast
+where there is none):
+
+- **A session finished**: another session in the same project folder went
+  from busy to idle. Sessions in other folders notify their own folder's
+  sessions, not this one.
+- **A possible conflict**: two sessions started working in the same folder,
+  or touched the same file.
+- **A message arrived**: a toast with the sender and the first line.
+
+In the terminal the pane draws the same cards with text bars:
 
 ```
  ◎ Session radar                       updated 12s ago
@@ -49,52 +118,6 @@ tool usage for the session you are in, in a pane beside the chat.**
 ╰────────────────────────────────────────────────╯
 ```
 
-On VS Code, the desktop app and the mobile app the gauges are drawn as rings,
-the token mix as a stacked bar and the per-turn history as small charts. The
-terminal shows the same numbers with text bars.
-
-## Why
-
-When several Claude Code sessions run at once, agents can message each other
-with `SendMessage`, but only by a peer name such as `webshop-6d`. Nothing on
-screen tells you which editor tab that name belongs to, and the tab title
-("Payment webhook retries") is not something an agent can address.
-
-session-radar puts the two side by side: every open session, grouped by
-project folder, shown by its tab title with its peer name underneath and a
-Copy button. Tell one agent *"send the failing test output to `webshop-6d`"*
-and you know exactly which tab will receive it.
-
-## What it shows
-
-| Card | Contents |
-| --- | --- |
-| **This session** | Tab title, peer name (with Copy), model, uptime |
-| **Overview** | Context fill, 5-hour and 7-day rate limits as gauges (green, then amber from 60 %, red from 85 %), time to reset; cost, turns, average turn time, cost per turn; context fill after each turn; duration of each turn |
-| **Sessions** | Every open session on this machine, grouped by project folder: tab title, peer name, busy / idle, age, Copy. Your own session is marked ◆, busy ones ●. Offline Remote Control sessions are hidden behind a toggle |
-| **Possible conflicts** | Shown on top in amber when two sessions are busy in the same project folder at once, or when two sessions edited the same file in the last 30 minutes |
-| **Inbox** | Messages other sessions sent to this one, newest first, with Reply |
-| **Spend** | Today and the last 7 days across all your sessions, and today per project |
-| **Tokens** | Input, output, cache read and cache write as a stacked bar, cache hit rate, subagent turns on their own line |
-| **Tools** | The most used tools with call and error counts |
-
-It also pins a one-line summary under the prompt:
-
-```
-◆ webshop-04  │  ctx ▰▰▰▱▱▱▱▱ 42%  │  $4.67  │  5h 23%  │  ⇄ 3 live (1 busy)  │  ✉ 1  │  ⚠ 1 conflict
-```
-
-And it tells you when something needs you, as a desktop notification (or a
-toast where the terminal has none):
-
-- **A session finished.** When another session in the same project folder
-  goes from busy to idle: *"webshop-6d finished: Payment webhook retries"*.
-  Run several agents at once and stop checking tabs. Sessions in other
-  folders do not notify here; they notify the sessions of their own folder.
-- **A possible conflict.** When two sessions start working in the same folder,
-  or touch the same file: *"cart.ts was edited by webshop-04 and webshop-6d"*.
-- **A message arrived.** A toast with the sender and the first line.
-
 ## Where it works
 
 | Surface | Pane | Charts | Status line |
@@ -104,8 +127,10 @@ toast where the terminal has none):
 | Claude desktop app | ✓ | ✓ | ✓ |
 | Claude mobile app (Remote Control) | ✓ | ✓ | ✓ |
 
-The session list covers sessions on the same machine (and Remote Control
-sessions on your account), in any project folder.
+On VS Code, the desktop app and the mobile app the gauges are drawn as rings,
+the token mix as a stacked bar and the per-turn history as small charts. The
+session list covers sessions on the same machine (and Remote Control sessions
+on your account), in any project folder.
 
 ## Install
 
@@ -114,8 +139,9 @@ sessions on your account), in any project folder.
 ```
 
 Answer `y` to add the marketplace, then pick **user** scope so every session
-gets it. Every new session shows the status line summary; the pane stays closed until you type `/radar`. Sessions that were already
-running pick it up the next time they start.
+gets it. Every new session shows the status line summary; the pane stays
+closed until you type `/radar`. Sessions that were already running pick it up
+the next time they start.
 
 Requires a Claude Code release with mods (function hooks). Mods are an
 early-access feature; check `claude --version` if the install refuses the

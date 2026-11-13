@@ -1,6 +1,19 @@
-import type { Conflict, InboxItem, LedgerEdit, LedgerFile, Spend } from '../types'
+import type {
+  Conflict,
+  InboxItem,
+  LedgerEdit,
+  LedgerFile,
+  PeerEdit,
+  Spend,
+  Waiting,
+  WaitingSession,
+} from '../types'
 
 export const EDIT_WINDOW_MS = 30 * 60_000
+export const WAIT_WINDOW_MS = 60 * 60_000
+// idle_prompt is left out on purpose: a session that only waits for the next
+// prompt is the "finished" notice, not a session that is stuck.
+export const BLOCKING_NOTICES = new Set(['permission_prompt', 'elicitation_dialog'])
 export const EDITS_MAX = 40
 export const WEEK_DAYS = 7
 export const INBOX_MAX = 20
@@ -103,6 +116,75 @@ export const findConflicts = (
 export const conflictKey = (c: Conflict): string =>
   `${c.kind}|${c.target}|${c.sessions.join(',')}`
 
+export type RegistryPeer = { name: string; sessionId: string; status: string | null }
+
+export const findPeerEdit = (
+  ledgers: LedgerFile[],
+  registry: RegistryPeer[],
+  selfId: string,
+  file: string,
+  now: number,
+  busy: string,
+): PeerEdit | null => {
+  const working = new Map(registry.filter(r => r.status === busy).map(r => [r.sessionId, r.name]))
+  let latest: PeerEdit | null = null
+  for (const ledger of ledgers) {
+    const name = working.get(ledger.sessionId)
+    if (ledger.sessionId === selfId || name === undefined) continue
+    for (const edit of ledger.edits) {
+      if (edit.file !== file || now - edit.at > EDIT_WINDOW_MS) continue
+      if (latest === null || edit.at > latest.at) {
+        latest = { name, sessionId: ledger.sessionId, at: edit.at }
+      }
+    }
+  }
+
+  return latest
+}
+
+export const findWaiting = (
+  ledgers: LedgerFile[],
+  registry: RegistryPeer[],
+  selfId: string | null,
+  now: number,
+  offline: string,
+): WaitingSession[] => {
+  const live = new Map(registry.filter(r => r.status !== offline).map(r => [r.sessionId, r.name]))
+
+  return ledgers
+    .flatMap(l => {
+      const name = live.get(l.sessionId)
+      const w = l.waiting
+      if (l.sessionId === selfId || name === undefined || w === null) return []
+      if (now - w.at > WAIT_WINDOW_MS) return []
+
+      return [
+        {
+          sessionId: l.sessionId,
+          name,
+          title: l.title,
+          project: l.project,
+          cwd: l.cwd,
+          kind: w.kind,
+          message: w.message,
+          at: w.at,
+        },
+      ]
+    })
+    .sort((a, b) => a.at - b.at)
+}
+
+export const waitingKey = (w: WaitingSession): string => `${w.sessionId}|${w.at}`
+
+const toWaiting = (value: unknown): Waiting | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const v = value as Record<string, unknown>
+
+  return typeof v.kind === 'string' && typeof v.message === 'string' && typeof v.at === 'number'
+    ? { kind: v.kind, message: v.message, at: v.at }
+    : null
+}
+
 export const summarizeSpend = (
   ledgers: LedgerFile[],
   today: string,
@@ -158,6 +240,7 @@ export const toLedgerFile = (value: unknown): LedgerFile | null => {
         typeof (e as LedgerEdit).file === 'string' &&
         typeof (e as LedgerEdit).at === 'number',
     ),
+    waiting: toWaiting(v.waiting),
     updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : 0,
   }
 }

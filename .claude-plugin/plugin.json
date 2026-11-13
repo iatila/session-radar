@@ -1,7 +1,7 @@
 {
   "name": "session-radar",
-  "version": "0.2.0",
-  "description": "A side pane with this session's peer name, the other open sessions you can message, context fill, cost, rate limits, tokens and tool-call stats.",
+  "version": "0.3.0",
+  "description": "A side pane with this session's peer name, the other open sessions you can message, which of them wait for you, edit-conflict warnings for you and your agents, context fill, cost, rate limits, tokens and tool-call stats.",
   "author": {
     "name": "iatila"
   },
@@ -24,6 +24,16 @@
       "options": [
         "this-project",
         "all-projects"
+      ]
+    },
+    "agentWarnings": {
+      "type": "string",
+      "title": "Warn agents about edit conflicts",
+      "description": "When another session that is still working edited a file moments ago, refuse this session's first edit of it once, naming that session, so the agent re-reads the file and can message the other session first.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
       ]
     }
   },

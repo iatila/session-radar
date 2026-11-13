@@ -78,6 +78,21 @@ export type Spend = {
 
 export type LedgerEdit = { file: string; at: number }
 
+export type Waiting = { kind: string; message: string; at: number }
+
+export type WaitingSession = {
+  sessionId: string
+  name: string
+  title: string | null
+  project: string
+  cwd: string
+  kind: string
+  message: string
+  at: number
+}
+
+export type PeerEdit = { name: string; sessionId: string; at: number }
+
 export type LedgerFile = {
   sessionId: string
   name: string | null
@@ -87,6 +102,7 @@ export type LedgerFile = {
   day: string
   usd: number
   edits: LedgerEdit[]
+  waiting: Waiting | null
   updatedAt: number
 }
 
@@ -105,6 +121,7 @@ declare module 'claude-code' {
       inbox: Shaped<InboxItem[]>
       inboxSeenAt: number
       conflicts: Shaped<Conflict[]>
+      waiting: Shaped<WaitingSession[]>
       spend: Shaped<Spend>
       compose: string | null
       ledgerError: string | null

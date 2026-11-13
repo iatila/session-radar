@@ -21,7 +21,11 @@ something needs you.
 **1. Two agents reach for the same file.** You asked one session to refactor
 the cart and another to fix the checkout tests. Both open `cart.ts`. An amber
 warning appears on top of the pane (as in the picture above), and a notification tells you before the
-edits collide.
+edits collide. Your agents hear about it too: when the second one goes to edit
+`cart.ts` while the first is still working, that edit is refused once with
+*"webshop-04 is still working and edited …/webshop/cart.ts 2m ago"*. The agent
+re-reads the file and can message `webshop-04` first; repeating the edit goes
+through.
 
 **2. You stop checking tabs.** You switch to something else. When the test
 session goes from busy to idle you get *"webshop-6d finished: Product search
@@ -29,7 +33,13 @@ tests"*. By default only sessions in the same project notify you; with three
 or four VS Code windows open, switch **Finished notices** to `all-projects`
 in `/config` and hear from every window while you work in one.
 
-**3. Agents hand work to each other.** Press ⧉ next to a session to copy its
+**3. One of them is waiting for you.** A session stops on a permission
+question while you are in another tab. Its card appears at the top of the
+pane (*"webshop-6d: Claude needs your permission to use Bash"*), a notification
+tells you, and the status line shows *⏸ 1 waiting*. It disappears as soon as
+you answer.
+
+**4. Agents hand work to each other.** Press ⧉ next to a session to copy its
 name, then tell your agent *"send the failing test output to `webshop-6d`"*.
 Or press ✉ and type the message yourself, with no model call. The answer
 lands in your Inbox.
@@ -56,6 +66,7 @@ Copy button.
 | **This session** | Tab title, peer name, model, uptime |
 | **Overview** | Context fill, 5-hour and 7-day rate limits as gauges (green, then amber from 60 %, red from 85 %), time to reset; cost, turns, average turn time, cost per turn; context fill after each turn; duration of each turn |
 | **Sessions** | Every open session on this machine, grouped by project folder: tab title, peer name, busy / idle, age, Copy. Your own session is marked ◆, busy ones ●. Offline Remote Control sessions are hidden behind a toggle |
+| **Waiting for you** | Shown on top in red when another session is stopped on a permission question or a question to you: its name, project, what it asks and for how long. Gone when it carries on |
 | **Possible conflicts** | Shown on top in amber when two sessions are busy in the same project folder at once, or when two sessions edited the same file in the last 30 minutes |
 | **Inbox** | Messages other sessions sent to this one, newest first, with Reply |
 | **Spend** | Today and the last 7 days across all your sessions, and today per project |
@@ -68,6 +79,8 @@ where there is none):
 - **A session finished**: another session went from busy to idle. Which
   sessions count is a setting (below): only this project's folder
   (default), or every open session in any project.
+- **A session needs you**: another session stopped on a permission question
+  or a question to you. Follows the same project scope as finished notices.
 - **A possible conflict**: two sessions started working in the same folder,
   or touched the same file.
 - **A message arrived**: a toast with the sender and the first line.
@@ -170,7 +183,8 @@ the pane.
 
 | Setting | Values | What it does |
 | --- | --- | --- |
-| **Finished notices** | `this-project` (default), `all-projects` | Which sessions tell you when they finish: only those in this session's project folder, or every open session. Pick `all-projects` when several VS Code windows each hold a project and you want to hear from the others while you work in one. |
+| **Finished notices** | `this-project` (default), `all-projects` | Which sessions tell you when they finish: only those in this session's project folder, or every open session. Pick `all-projects` when several VS Code windows each hold a project and you want to hear from the others while you work in one. Also decides whose "needs you" notices reach you. |
+| **Warn agents about edit conflicts** | `on` (default), `off` | When another session that is still working edited a file in the last 30 minutes, this session's first edit of it is refused once with who and when, so the agent can re-read the file and message the other session. The same edit again goes through. |
 
 **Messaging another session.** Press ✉ next to the session you want, type,
 press Enter. The message goes straight to that session, no model call on your
@@ -204,11 +218,16 @@ window is used and when it resets.
   seconds and comparing each session's status with the last reading; with
   `this-project`, only sessions whose folder matches this session's raise a
   notice.
-- **Spend, edits and titles across sessions** go through a small ledger:
-  every session that runs session-radar writes one file a day,
+- **Waiting sessions** come from the engine's `Notification` event
+  (`permission_prompt` and `elicitation_dialog`; the idle prompt is the
+  finished notice). A session writes the question into its own ledger file and
+  clears it when a tool runs, a turn ends or you send a prompt; the others
+  read it every 10 seconds and ignore anything older than an hour.
+- **Spend, edits, titles and waits across sessions** go through a small
+  ledger: every session that runs session-radar writes one file a day,
   `~/.claude/session-radar/ledger/<day>/<session id>.json`, holding its own
-  cost for that day, its title and the files it edited in the last 30
-  minutes. Each session writes only its own file and reads the others.
+  cost for that day, its title, the question it waits on, if any, and the
+  files it edited in the last 30 minutes. Each session writes only its own file and reads the others.
 - **Messages** use the same channel as `SendMessage`; incoming ones are read
   from the `<cross-session-message>` envelope the engine wraps them in.
 

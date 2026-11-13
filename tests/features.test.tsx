@@ -4,6 +4,8 @@ import {
   addEdit,
   dayKey,
   findConflicts,
+  findPeerEdit,
+  findWaiting,
   normalizePath,
   parseInbound,
   summarizeSpend,
@@ -48,6 +50,7 @@ const ledger = (over: Partial<LedgerFile>): LedgerFile => ({
   day: DAY,
   usd: 0,
   edits: [],
+  waiting: null,
   updatedAt: 0,
   ...over,
 })
@@ -429,4 +432,178 @@ test('with finishedNotices all-projects, a session in another project notifies t
   await clock.advance(10_000)
 
   expect(notices.some(n => n.startsWith('blog-58 finished'))).toBe(true)
+})
+
+const WAITING = { kind: 'permission_prompt', message: 'Claude needs your permission to use Bash', at: 0 }
+
+const REGISTRY = [
+  { name: 'webshop-04', sessionId: SELF_ID, status: 'busy' },
+  { name: 'webshop-6d', sessionId: PEER_ID, status: 'busy' },
+]
+
+test('a busy peer that edited the file lately is found, an idle or own edit is not', () => {
+  const edits = [{ file: '/work/webshop/cart.ts', at: 1000 }]
+  const ledgers = [ledger({ edits }), ledger({ sessionId: PEER_ID, edits })]
+
+  expect(findPeerEdit(ledgers, REGISTRY, SELF_ID, '/work/webshop/cart.ts', 5000, 'busy')).toEqual({
+    name: 'webshop-6d',
+    sessionId: PEER_ID,
+    at: 1000,
+  })
+  expect(findPeerEdit(ledgers, REGISTRY, SELF_ID, '/work/webshop/other.ts', 5000, 'busy')).toBe(null)
+  expect(findPeerEdit(ledgers, REGISTRY, SELF_ID, '/work/webshop/cart.ts', 31 * 60_000 + 1000, 'busy')).toBe(null)
+  const idle = REGISTRY.map(r => ({ ...r, status: 'idle' }))
+  expect(findPeerEdit(ledgers, idle, SELF_ID, '/work/webshop/cart.ts', 5000, 'busy')).toBe(null)
+})
+
+test('waiting sessions are other live sessions with a fresh wait, oldest first', () => {
+  const ledgers = [
+    ledger({ waiting: WAITING }),
+    ledger({ sessionId: PEER_ID, title: 'Cart rewrite', waiting: WAITING }),
+    ledger({ sessionId: 'gone', waiting: WAITING }),
+  ]
+  const found = findWaiting(ledgers, REGISTRY, SELF_ID, 60_000, 'offline')
+
+  expect(found.map(w => [w.name, w.title, w.message])).toEqual([
+    ['webshop-6d', 'Cart rewrite', 'Claude needs your permission to use Bash'],
+  ])
+  expect(findWaiting(ledgers, REGISTRY, SELF_ID, 61 * 60_000, 'offline')).toEqual([])
+  const offline = [{ name: 'webshop-6d', sessionId: PEER_ID, status: 'offline' }]
+  expect(findWaiting(ledgers, offline, SELF_ID, 60_000, 'offline')).toEqual([])
+})
+
+const registryFile = (name: string, sessionId: string, status: string): [string, string] => [
+  `${SESSIONS}/${name}.json`,
+  JSON.stringify({ name, sessionId, cwd: '/work/webshop', startedAt: 0, status }),
+]
+
+const ledgerFile = (over: Partial<LedgerFile>): [string, string] => [
+  `${HOME}/.claude/session-radar/ledger/${DAY}/${over.sessionId ?? SELF_ID}.json`,
+  JSON.stringify(ledger(over)),
+]
+
+test('the first edit of a file a busy peer just edited is refused once, the repeat goes through', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const files = new Map<string, string>([
+    registryFile('webshop-04', SELF_ID, 'busy'),
+    registryFile('webshop-6d', PEER_ID, 'busy'),
+    ledgerFile({ sessionId: PEER_ID, name: 'webshop-6d', edits: [{ file: '/work/webshop/cart.ts', at: 0 }] }),
+  ])
+  on('command.register', () => ({ value: { command: 'radar' } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: SELF_ID }))
+  on('session.cwd', () => ({ value: '/work/webshop' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  on('fs.exists', (_, e) => {
+    const path = norm(e.path)
+
+    return { value: files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)) }
+  })
+  on('fs.list', (_, e) => {
+    const dir = `${norm(e.path)}/`
+
+    return {
+      value: [...files.keys()]
+        .filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/'))
+        .map(k => ({ name: k.slice(dir.length), kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })),
+    }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => ({ value: files.get(norm(e.path)) ?? '' }))
+  on('fs.write', () => ({ value: undefined }))
+  on('tool.call', { tool: 'ListAgents' }, () => ({ result: { listing: LISTING } }))
+  on('tool.call', () => ({ result: {} }))
+
+  await $.session.start({ cwd: '/work/webshop', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const edit = { tool: 'Edit', file_path: '/work/webshop/cart.ts', old_string: 'a', new_string: 'b' } as const
+  const first = await $.tool.call(edit)
+  const second = await $.tool.call(edit)
+  const elsewhere = await $.tool.call({ ...edit, file_path: '/work/webshop/other.ts' })
+  await clock.settle()
+
+  expect('deny' in first ? first.deny : '').toMatch(/webshop-6d is still working and edited …\/webshop\/cart\.ts/)
+  expect('deny' in second).toBe(false)
+  expect('deny' in elsewhere).toBe(false)
+})
+
+test('a session waiting for permission is shown and announced, then cleared when it moves on', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const files = new Map<string, string>([
+    registryFile('webshop-04', SELF_ID, 'busy'),
+    registryFile('webshop-6d', PEER_ID, 'busy'),
+    ledgerFile({ sessionId: PEER_ID, name: 'webshop-6d', title: 'Cart rewrite', waiting: WAITING }),
+  ])
+  const notices: string[] = []
+  on('classic.Notification', () => ({}))
+  on('command.register', () => ({ value: { command: 'radar' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.notify', (_, e) => {
+    notices.push(e.text)
+
+    return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: SELF_ID }))
+  on('session.cwd', () => ({ value: '/work/webshop' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  on('fs.exists', (_, e) => {
+    const path = norm(e.path)
+
+    return { value: files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)) }
+  })
+  on('fs.list', (_, e) => {
+    const dir = `${norm(e.path)}/`
+
+    return {
+      value: [...files.keys()]
+        .filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/'))
+        .map(k => ({ name: k.slice(dir.length), kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })),
+    }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => ({ value: files.get(norm(e.path)) ?? '' }))
+  on('fs.write', (_, e) => {
+    files.set(norm(e.path), e.text)
+
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'ListAgents' }, () => ({ result: { listing: LISTING } }))
+  on('tool.call', () => ({ result: {} }))
+
+  await $.session.start({ cwd: '/work/webshop', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  await clock.advance(10_000)
+
+  expect(notices).toContain('webshop-6d needs you: Claude needs your permission to use Bash')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /WAITING FOR YOU/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Claude needs your permission to use Bash/ })).toBeTruthy()
+  await ui.unmount()
+
+  const mineAt = `${HOME}/.claude/session-radar/ledger/${DAY}/${SELF_ID}.json`
+  await $.classic.Notification({ notification_type: 'idle_prompt', message: 'Claude is waiting for your input' })
+  await clock.settle()
+  expect(JSON.parse(files.get(mineAt) ?? '{}').waiting ?? null).toBe(null)
+
+  await $.classic.Notification({ notification_type: 'permission_prompt', message: 'Claude needs your permission to use Edit' })
+  await clock.settle()
+  expect(JSON.parse(files.get(mineAt) ?? '{}').waiting).toMatchObject({
+    kind: 'permission_prompt',
+    message: 'Claude needs your permission to use Edit',
+  })
+
+  await $.tool.call({ tool: 'Edit', file_path: '/work/webshop/a.ts', old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(JSON.parse(files.get(mineAt) ?? '{}').waiting).toBe(null)
 })

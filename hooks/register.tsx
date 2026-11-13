@@ -16,8 +16,11 @@ import type {
   Turns,
   Usage,
   View,
+  Waiting,
+  WaitingSession,
 } from '../types'
 import {
+  BLOCKING_NOTICES,
   EDIT_TOOLS,
   INBOX_MAX,
   WEEK_DAYS,
@@ -25,12 +28,15 @@ import {
   conflictKey,
   dayKey,
   findConflicts,
+  findPeerEdit,
+  findWaiting,
   toLedgerFile,
   lastDays,
   normalizePath,
   parseInbound,
   shortPath,
   summarizeSpend,
+  waitingKey,
 } from './ledger'
 
 const PANE = 'session-radar'
@@ -56,6 +62,8 @@ const REMOTE_GROUP = 'Remote Control'
 const SELF_LINE = /^This session is (.+?) \[([^\]]+)\]/
 const FINISHED_OPTION = 'finishedNotices'
 const FINISHED_EVERYWHERE = 'all-projects'
+const AGENT_OPTION = 'agentWarnings'
+const AGENT_WARNINGS_OFF = 'off'
 const WINDOWS_OS = 'Windows_NT'
 const CLIPBOARD_ENV = 'SESSION_RADAR_CLIP'
 const CLIPBOARD_TIMEOUT_MS = 5_000
@@ -154,6 +162,11 @@ const conflicts = atom(
   { plugin: 'session-radar', key: 'conflicts' } as const,
   [] as Conflict[],
   { shape: 'conflicts-1' },
+)
+const waiters = atom(
+  { plugin: 'session-radar', key: 'waiting' } as const,
+  [] as WaitingSession[],
+  { shape: 'waiting-1' },
 )
 const spendSummary = atom(
   { plugin: 'session-radar', key: 'spend' } as const,
@@ -665,14 +678,15 @@ async function refreshStatus($: EngineInterface): Promise<void> {
   const seenAt = await read($, inboxSeenAt)
   const unread = (await read($, inbox)).filter(m => m.at > seenAt).length
   const conflictCount = (await read($, conflicts)).length
-  $.ui.status(statusLine(who, u, peers, { unread, conflicts: conflictCount }))
+  const waitingCount = (await read($, waiters)).length
+  $.ui.status(statusLine(who, u, peers, { unread, conflicts: conflictCount, waiting: waitingCount }))
 }
 
 export const statusLine = (
   who: Identity,
   u: Usage,
   peers: Peer[],
-  extra: { unread: number; conflicts: number } = { unread: 0, conflicts: 0 },
+  extra: { unread: number; conflicts: number; waiting?: number } = { unread: 0, conflicts: 0 },
 ): string | undefined => {
   const live = peers.filter(p => !p.isSelf && p.status !== OFFLINE)
   const busy = live.filter(p => p.status === BUSY).length
@@ -685,6 +699,7 @@ export const statusLine = (
     u.costUsd === null ? null : fmtUsd(u.costUsd),
     fiveHour === undefined ? null : `5h ${Math.round(fiveHour.percentUsed)}%`,
     live.length === 0 ? null : `⇄ ${live.length} live${busy > 0 ? ` (${busy} busy)` : ''}`,
+    extra.waiting === undefined || extra.waiting === 0 ? null : `⏸ ${extra.waiting} waiting`,
     extra.unread === 0 ? null : `✉ ${extra.unread}`,
     extra.conflicts === 0 ? null : `⚠ ${extra.conflicts} conflict${extra.conflicts > 1 ? 's' : ''}`,
   ].filter((p): p is string => p !== null)
@@ -719,12 +734,24 @@ async function refreshAll($: EngineInterface, isForced: boolean): Promise<void> 
   await refreshStatus($)
 }
 
-type MyLedger = { day: string; baseUsd: number; lastUsd: number; edits: LedgerEdit[] }
+type MyLedger = {
+  day: string
+  baseUsd: number
+  lastUsd: number
+  edits: LedgerEdit[]
+  waiting: Waiting | null
+}
+
+type LedgerChange = { costUsd?: number; editedFile?: string; waiting?: Waiting | null }
 
 let mine: MyLedger | null = null
 let ledgerQueue: Promise<void> = Promise.resolve()
 const lastStatus = new Map<string, string | null>()
 const seenConflicts = new Set<string>()
+const seenWaiting = new Set<string>()
+const warnedEdits = new Set<string>()
+let callsInFlight = 0
+let callsWhenBlocked = 0
 
 const ledgerPath = (root: string, day: string, sessionId: string): string =>
   `${root}/${LEDGER_DIR}/${day}/${sessionId}.json`
@@ -774,19 +801,16 @@ async function startLedgerDay(
   const path = ledgerPath(root, day, sessionId)
   const stored = (await $.fs.exists(path)) ? await readLedgerFile($, path) : null
   if (stored !== null) {
-    return { day, baseUsd: costUsd - stored.usd, lastUsd: costUsd, edits: stored.edits }
+    return { day, baseUsd: costUsd - stored.usd, lastUsd: costUsd, edits: stored.edits, waiting: null }
   }
-  if (mine !== null) return { day, baseUsd: mine.lastUsd, lastUsd: costUsd, edits: [] }
+  if (mine !== null) return { day, baseUsd: mine.lastUsd, lastUsd: costUsd, edits: [], waiting: null }
   const startedAt = (await read($, usage)).startedAt
   const isStartedToday = startedAt !== null && dayKey(startedAt, offset) === day
 
-  return { day, baseUsd: isStartedToday ? 0 : costUsd, lastUsd: costUsd, edits: [] }
+  return { day, baseUsd: isStartedToday ? 0 : costUsd, lastUsd: costUsd, edits: [], waiting: null }
 }
 
-async function writeLedgerNow(
-  $: EngineInterface,
-  change: { costUsd?: number; editedFile?: string },
-): Promise<void> {
+async function writeLedgerNow($: EngineInterface, change: LedgerChange): Promise<void> {
   const root = await configRoot($)
   const who = await read($, identity)
   if (root === null || who.sessionId === null) return
@@ -800,6 +824,7 @@ async function writeLedgerNow(
     lastUsd: costUsd,
     edits:
       change.editedFile === undefined ? mine.edits : addEdit(mine.edits, change.editedFile, now),
+    waiting: change.waiting === undefined ? mine.waiting : change.waiting,
   }
   const cwd = await $.session.cwd()
   const file: LedgerFile = {
@@ -811,6 +836,7 @@ async function writeLedgerNow(
     day,
     usd: Math.max(0, costUsd - mine.baseUsd),
     edits: mine.edits,
+    waiting: mine.waiting,
     updatedAt: now,
   }
   await $.fs.write(ledgerPath(root, day, who.sessionId), JSON.stringify(file))
@@ -818,10 +844,7 @@ async function writeLedgerNow(
 
 // Each write waits for the one before; a failed write is shown on the Spend
 // card and logged, and the queue goes on so the next change is still written.
-function writeLedger(
-  $: EngineInterface,
-  change: { costUsd?: number; editedFile?: string },
-): Promise<void> {
+function writeLedger($: EngineInterface, change: LedgerChange): Promise<void> {
   ledgerQueue = ledgerQueue
     .then(() => writeLedgerNow($, change))
     .then(
@@ -895,12 +918,8 @@ async function watch($: EngineInterface, isFinishedEverywhere: boolean): Promise
     : dir.peers
   if (isChanged) await update($, directory, d => ({ ...d, peers }))
 
-  const found = findConflicts(
-    peers.filter(p => p.status !== OFFLINE),
-    await readLedgers($, root, [day]),
-    now,
-    BUSY,
-  )
+  const ledgers = await readLedgers($, root, [day])
+  const found = findConflicts(peers.filter(p => p.status !== OFFLINE), ledgers, now, BUSY)
   const before = await read($, conflicts)
   const keys = found.map(conflictKey).sort().join('\n')
   if (keys !== before.map(conflictKey).sort().join('\n')) {
@@ -911,6 +930,20 @@ async function watch($: EngineInterface, isFinishedEverywhere: boolean): Promise
     if (seenConflicts.has(key)) continue
     seenConflicts.add(key)
     await notify($, conflictText(c))
+  }
+
+  const blocked = findWaiting(ledgers, registry, who.sessionId, now, OFFLINE)
+  const blockedKeys = blocked.map(waitingKey).join('\n')
+  if (blockedKeys !== (await read($, waiters)).map(waitingKey).join('\n')) {
+    await update($, waiters, () => blocked)
+  }
+  for (const w of blocked) {
+    const key = waitingKey(w)
+    if (seenWaiting.has(key)) continue
+    seenWaiting.add(key)
+    if (isFinishedEverywhere || normalizePath(w.cwd) === ownFolder) {
+      await notify($, `${w.name} needs you: ${w.message}`)
+    }
   }
   await refreshStatus($)
 }
@@ -992,8 +1025,38 @@ async function setTitle($: EngineInterface, title: string | undefined): Promise<
   }))
 }
 
+// A peer that is still working and edited this file moments ago has changed
+// what this session read. The first attempt is refused with who and when; the
+// same attempt again goes through, so the agent decides after checking.
+async function peerEditWarning($: EngineInterface, file: string): Promise<string | null> {
+  const root = await configRoot($)
+  const who = await read($, identity)
+  if (root === null || who.sessionId === null) return null
+  const { now, day } = await today($)
+  const [registry, ledgers] = await Promise.all([readRegistry($, root), readLedgers($, root, [day])])
+  const hit = findPeerEdit(ledgers, registry, who.sessionId, file, now, BUSY)
+  if (hit === null) return null
+  const key = `${file}|${hit.sessionId}|${hit.at}`
+  if (warnedEdits.has(key)) return null
+  warnedEdits.add(key)
+
+  return `session-radar: ${hit.name} is still working and edited ${shortPath(file)} ${fmtAge(now - hit.at)}. Re-read the file to see what changed, and message ${hit.name} (SendMessage) if your change overlaps with theirs. This notice appears once: repeat the edit to go ahead.`
+}
+
+async function markWaiting($: EngineInterface, kind: string, message: string): Promise<void> {
+  callsWhenBlocked = callsInFlight
+  await writeLedger($, { waiting: { kind, message, at: await $.clock.now() } })
+}
+
+function clearWaiting($: EngineInterface): void {
+  if (!mine?.waiting) return
+  mine = { ...mine, waiting: null }
+  background($, 'clear waiting', writeLedger($, { waiting: null }))
+}
+
 export const register: Register = (on, options) => {
   const isFinishedEverywhere = options[FINISHED_OPTION] === FINISHED_EVERYWHERE
+  const isAgentWarned = options[AGENT_OPTION] !== AGENT_WARNINGS_OFF
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -1026,6 +1089,15 @@ export const register: Register = (on, options) => {
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await setTitle($, e.session_title)
+    clearWaiting($)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.Notification', async ($, e, next) => {
+    if (BLOCKING_NOTICES.has(e.notification_type)) {
+      await markWaiting($, e.notification_type, e.message)
+    }
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -1052,7 +1124,22 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     if (e.tool === 'ListAgents' && ownListCalls > 0) return next(e)
 
-    const ran = await next(e)
+    const target = e as { file_path?: unknown; notebook_path?: unknown }
+    const edited = target.file_path ?? target.notebook_path
+    if (isAgentWarned && EDIT_TOOLS.has(e.tool) && typeof edited === 'string') {
+      const warning = await peerEditWarning($, normalizePath(edited))
+      if (warning !== null) return { deny: warning }
+    }
+
+    if (mine?.waiting && callsWhenBlocked === 0) clearWaiting($)
+    callsInFlight += 1
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } finally {
+      callsInFlight -= 1
+    }
+    if (callsInFlight === 0) clearWaiting($)
     const bump = (s: ToolStat | undefined): ToolStat => {
       const base = s ?? { calls: 0, errors: 0, denied: 0 }
 
@@ -1064,8 +1151,6 @@ export const register: Register = (on, options) => {
     }
     await update($, tools, all => ({ ...all, [e.tool]: bump(all[e.tool]) }))
 
-    const target = e as { file_path?: unknown; notebook_path?: unknown }
-    const edited = target.file_path ?? target.notebook_path
     const isEdit = EDIT_TOOLS.has(e.tool) && ran.deny === undefined && ran.isError !== true
     if (isEdit && typeof edited === 'string') {
       void writeLedger($, { editedFile: normalizePath(edited) })
@@ -1104,7 +1189,10 @@ export const register: Register = (on, options) => {
         main: spent ? addTokens(t.main, spent) : t.main,
       }
     })
-    if (e.agentId === undefined) background($, 'refresh', refreshAll($, false))
+    if (e.agentId === undefined) {
+      clearWaiting($)
+      background($, 'refresh', refreshAll($, false))
+    }
 
     return done
   }).catch(($, e, next) => next(e))
@@ -1205,6 +1293,7 @@ export const register: Register = (on, options) => {
     const messages = await read($, inbox)
     const seenAt = await read($, inboxSeenAt)
     const found = await read($, conflicts)
+    const blocked = await read($, waiters)
     const costs = await read($, spendSummary)
     const composeTo = await read($, compose)
     const writeError = await read($, ledgerError)
@@ -1339,6 +1428,40 @@ export const register: Register = (on, options) => {
               {c.kind === 'folder' ? '⇄ ' : '✎ '}
               {conflictText(c)}
             </Text>
+          ))}
+        </Box>
+      )
+
+    const needsYou =
+      blocked.length === 0 ? null : (
+        <Box
+          key="card:needs-you"
+          flexDirection="column"
+          borderStyle="round"
+          borderColor="error"
+          paddingX={1}
+        >
+          <Text size="caption" weight="semibold" color="error">
+            ⏸ {blocked.length === 1 ? 'WAITING FOR YOU' : `${blocked.length} WAITING FOR YOU`}
+          </Text>
+          {blocked.map(w => (
+            <Box key={`waiting:${waitingKey(w)}`} flexDirection="row" alignItems="center" gap={1}>
+              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                <Text size="footnote" weight="medium" wrap="truncate-end">
+                  {w.title ?? w.name} <Text dimColor>· {w.project} · {fmtAge(now - w.at)}</Text>
+                </Text>
+                <Text size="caption" dimColor wrap="wrap">
+                  {w.message}
+                </Text>
+              </Box>
+              <Button
+                key={`waiting:copy:${w.sessionId}`}
+                plain
+                onPress={press => void copy($, w.name, press.surface)}
+              >
+                <Text color="#199e70">⧉</Text>
+              </Button>
+            </Box>
           ))}
         </Box>
       )
@@ -1702,6 +1825,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={1}>
         {header}
         {toolbar}
+        {needsYou}
         {alerts}
         {cards[shownView]}
       </Box>
